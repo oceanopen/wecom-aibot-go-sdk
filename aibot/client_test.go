@@ -3,6 +3,7 @@ package aibot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -254,5 +255,276 @@ func TestWsClientOnMessagePassthrough(t *testing.T) {
 	}
 	if gotMsgType != "text" {
 		t.Errorf("OnMessage body.msgtype = %q, want text", gotMsgType)
+	}
+}
+
+// ========== Reply / ReplyStream / ReplyStreamNonBlocking 测试 ==========
+
+// newReplyMockServer 构造一个 ack 流式回复的 mock 服务端，并通过 record 记录收到的 body。
+func newReplyMockServer(t *testing.T, record func(body map[string]any), slowFirst bool) (*mockWsServer, *sync.Mutex, *[]string) {
+	t.Helper()
+	var mu sync.Mutex
+	var contents []string
+	firstSeen := false
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		if cmd == types.WsCmd.Response {
+			var f struct {
+				Body struct {
+					MsgType string `json:"msgtype"`
+					Stream  struct {
+						Content string `json:"content"`
+					} `json:"stream"`
+				} `json:"body"`
+			}
+			_ = json.Unmarshal(msg, &f)
+			mu.Lock()
+			if record != nil {
+				var full struct {
+					Body map[string]any `json:"body"`
+				}
+				_ = json.Unmarshal(msg, &full)
+				record(full.Body)
+			}
+			contents = append(contents, f.Body.Stream.Content)
+			isFirst := slowFirst && !firstSeen
+			if isFirst {
+				firstSeen = true
+			}
+			mu.Unlock()
+			if isFirst {
+				time.Sleep(300 * time.Millisecond) // 第一条延迟 ack，制造 pending
+			}
+			return replyAckResponse(reqId)
+		}
+		return nil
+	})
+	return srv, &mu, &contents
+}
+
+// TestReplyStreamMiddleAndFinal 验证流式中间帧 + 最终帧发送，且 body 结构正确。
+func TestReplyStreamMiddleAndFinal(t *testing.T) {
+	var mu sync.Mutex
+	var streams []map[string]any
+	srv, recMu, _ := newReplyMockServer(t, func(body map[string]any) {
+		mu.Lock()
+		streams = append(streams, body)
+		mu.Unlock()
+	}, false)
+	_ = recMu
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url()})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	headers := types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}
+	if _, err := client.ReplyStream(headers, "sid1", "chunk1", false, nil, nil); err != nil {
+		t.Fatalf("middle frame error: %v", err)
+	}
+	if _, err := client.ReplyStream(headers, "sid1", "final", true, nil, nil); err != nil {
+		t.Fatalf("final frame error: %v", err)
+	}
+	client.Disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(streams) != 2 {
+		t.Fatalf("server received %d stream frames, want 2", len(streams))
+	}
+	for i, s := range streams {
+		if s["msgtype"] != "stream" {
+			t.Errorf("frame[%d].msgtype = %v, want stream", i, s["msgtype"])
+		}
+		stream, ok := s["stream"].(map[string]any)
+		if !ok {
+			t.Errorf("frame[%d].stream is not an object", i)
+			continue
+		}
+		if stream["id"] != "sid1" {
+			t.Errorf("frame[%d].stream.id = %v, want sid1", i, stream["id"])
+		}
+	}
+	mid := streams[0]["stream"].(map[string]any)
+	if mid["finish"] != false || mid["content"] != "chunk1" {
+		t.Errorf("middle frame = %v, want finish=false content=chunk1", mid)
+	}
+	fin := streams[1]["stream"].(map[string]any)
+	if fin["finish"] != true || fin["content"] != "final" {
+		t.Errorf("final frame = %v, want finish=true content=final", fin)
+	}
+}
+
+// TestReplyStreamNonBlockingSkip 验证非阻塞跳过路径：pending 时中间帧跳过，最终帧不跳过。
+func TestReplyStreamNonBlockingSkip(t *testing.T) {
+	srv, recMu, recContents := newReplyMockServer(t, nil, true)
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url()})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	headers := types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}
+
+	// 第一条（非最终）在 goroutine 中发送，服务端延迟 ack 制造 pending
+	var err1 error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err1 = client.ReplyStream(headers, "sid", "chunk1", false, nil, nil)
+	}()
+
+	// 轮询等待第一条 pending 建立
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && !client.HasPendingReplyAck(headers) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !client.HasPendingReplyAck(headers) {
+		t.Fatal("first frame should be pending before non-blocking calls")
+	}
+
+	// 非最终帧：上一条未 ack → 应跳过
+	_, err2 := client.ReplyStreamNonBlocking(headers, "sid", "chunk2", false, nil, nil)
+	if !errors.Is(err2, ErrReplySkipped) {
+		t.Errorf("non-blocking middle frame err = %v, want ErrReplySkipped", err2)
+	}
+
+	// 最终帧：始终发送（阻塞至第一条 ack 后发送）
+	_, err3 := client.ReplyStreamNonBlocking(headers, "sid", "final", true, nil, nil)
+	if err3 != nil {
+		t.Errorf("non-blocking final frame err = %v, want nil", err3)
+	}
+
+	wg.Wait()
+	if err1 != nil {
+		t.Errorf("first frame err = %v, want nil", err1)
+	}
+	client.Disconnect()
+
+	recMu.Lock()
+	defer recMu.Unlock()
+	want := []string{"chunk1", "final"}
+	if len(*recContents) != len(want) {
+		t.Fatalf("server received %v, want %v", *recContents, want)
+	}
+	for i, w := range want {
+		if (*recContents)[i] != w {
+			t.Errorf("received[%d] = %q, want %q (chunk2 should be skipped)", i, (*recContents)[i], w)
+		}
+	}
+}
+
+// TestReplyGeneric 验证通用 Reply 转发自定义 body 且收到回执。
+func TestReplyGeneric(t *testing.T) {
+	var mu sync.Mutex
+	var gotCmd, gotMsgType string
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		if cmd == types.WsCmd.Response {
+			var f struct {
+				Body struct {
+					MsgType string `json:"msgtype"`
+				} `json:"body"`
+			}
+			_ = json.Unmarshal(msg, &f)
+			mu.Lock()
+			gotCmd = cmd
+			gotMsgType = f.Body.MsgType
+			mu.Unlock()
+			return replyAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url()})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	headers := types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}
+	body := map[string]any{"msgtype": "text", "text": map[string]string{"content": "hi"}}
+	ack, err := client.Reply(headers, body, types.WsCmd.Response)
+	if err != nil {
+		t.Fatalf("Reply error: %v", err)
+	}
+	if ack == nil || ack.ErrCode != 0 {
+		t.Errorf("ack = %+v, want errcode 0", ack)
+	}
+	client.Disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotCmd != types.WsCmd.Response {
+		t.Errorf("server got cmd = %q, want %q", gotCmd, types.WsCmd.Response)
+	}
+	if gotMsgType != "text" {
+		t.Errorf("server got body.msgtype = %q, want text", gotMsgType)
+	}
+}
+
+// TestReplyDefaultCmd 验证 cmd 为空时兜底为 WsCmd.Response。
+func TestReplyDefaultCmd(t *testing.T) {
+	var mu sync.Mutex
+	var gotCmd string
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		if cmd == types.WsCmd.Response {
+			mu.Lock()
+			gotCmd = cmd
+			mu.Unlock()
+			return replyAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url()})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	headers := types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}
+	if _, err := client.Reply(headers, map[string]any{"msgtype": "text"}, ""); err != nil {
+		t.Fatalf("Reply error: %v", err)
+	}
+	client.Disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotCmd != types.WsCmd.Response {
+		t.Errorf("default cmd = %q, want %q", gotCmd, types.WsCmd.Response)
 	}
 }

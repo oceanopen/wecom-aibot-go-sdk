@@ -8,6 +8,7 @@ package aibot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -219,4 +220,67 @@ func (c *WsClient) Disconnect() {
 // IsConnected 获取当前连接状态，对应 Node get isConnected。
 func (c *WsClient) IsConnected() bool {
 	return c.wsManager.IsConnected()
+}
+
+// ========== 回复消息 ==========
+
+// ErrReplySkipped 非阻塞回复被跳过（上一条同 reqId 的回复尚未收到 ack）。
+//
+// ReplyStreamNonBlocking 在上一条回复未 ack 且当前帧非最终帧时返回此错误。
+var ErrReplySkipped = errors.New("reply skipped: previous reply for this req_id has not been acknowledged yet")
+
+// Reply 通过 WebSocket 通道发送回复消息（通用方法），对应 Node reply。
+//
+// 首参为 WsFrameHeaders（调用方传 frame.Headers），透传 headers.req_id。
+// cmd 为空时由 WsConnectionManager.SendReply 兜底为 WsCmd.Response。
+// 阻塞至收到服务端回执，返回回执帧（errcode 非 0 时同时返回帧与错误）。
+func (c *WsClient) Reply(frame types.WsFrameHeaders, body any, cmd string) (*types.WsFrame[json.RawMessage], error) {
+	return c.wsManager.SendReply(frame, body, cmd)
+}
+
+// ReplyStream 发送流式文本回复，对应 Node replyStream。
+//
+// 同一 streamId 的多次调用刷新内容；finish=true 结束流式消息。
+// msgItem 仅在 finish=true 时附带（图文混排项）；feedback 仅在首次回复时设置。
+// 阻塞至收到回执，返回回执帧。
+func (c *WsClient) ReplyStream(frame types.WsFrameHeaders, streamId, content string, finish bool, msgItem any, feedback any) (*types.WsFrame[json.RawMessage], error) {
+	stream := map[string]any{
+		"id":      streamId,
+		"finish":  finish,
+		"content": content,
+	}
+	// msg_item 仅在 finish=true 时支持
+	if finish && msgItem != nil {
+		stream["msg_item"] = msgItem
+	}
+	// feedback 仅在首次回复时设置
+	if feedback != nil {
+		stream["feedback"] = feedback
+	}
+	body := map[string]any{
+		"msgtype": "stream",
+		"stream":  stream,
+	}
+	return c.Reply(frame, body, types.WsCmd.Response)
+}
+
+// ReplyStreamNonBlocking 非阻塞流式文本回复，对应 Node replyStreamNonBlocking。
+//
+// 若上一条同 reqId 的回复尚未收到 ack 且当前帧非最终帧（finish=false），则跳过本次发送，
+// 返回 ErrReplySkipped，避免流式中间帧排队积压导致延迟。
+// finish=true 的最终帧始终保证发送（走正常队列）。
+func (c *WsClient) ReplyStreamNonBlocking(frame types.WsFrameHeaders, streamId, content string, finish bool, msgItem any, feedback any) (*types.WsFrame[json.RawMessage], error) {
+	// finish=true 的最终帧必须发送，不做跳过判断
+	if !finish && c.HasPendingReplyAck(frame) {
+		return nil, ErrReplySkipped
+	}
+	return c.ReplyStream(frame, streamId, content, finish, msgItem, feedback)
+}
+
+// HasPendingReplyAck 检查指定帧是否有未完成的 ack（即上一条回复还未收到回执），
+// 对应 Node hasPendingReplyAck。
+//
+// 用于流式场景：调用方可据此决定是否跳过当前中间帧，避免排队积压。
+func (c *WsClient) HasPendingReplyAck(frame types.WsFrameHeaders) bool {
+	return c.wsManager.HasPendingAck(frame.ReqId)
 }
