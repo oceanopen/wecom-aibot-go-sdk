@@ -3,6 +3,9 @@
 企业微信智能机器人 Go SDK，**代码层面 1:1 镜像** Node SDK（`https://github.com/WecomTeam/aibot-node-sdk`）：
 文件结构、文件命名、文件拆分、变量与类型命名均与 Node 参考项目保持一致。
 
+>  Node SDK（`https://github.com/WecomTeam/aibot-node-sdk`） 这个项目已 download 到本地，详见：`~/MyFiles/Project/aibot-node-sdk`，所以不用从 `github` 上实时拉取。
+>  每次执行完一个任务，更新 `task.md` 任务状态，执行后不要自动提交和继续，由我手动确认无误后自己提交。我主动告诉执行下个任务你再继续执行下个任务。
+
 ## module / 安装
 
 - module：`github.com/oceanopen/wecom-aibot-go-sdk`
