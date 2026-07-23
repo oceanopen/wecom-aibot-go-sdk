@@ -66,6 +66,12 @@ type WsConnectionManager struct {
 	// 认证结果通道（Connect 阻塞等待用）
 	authCh chan authResult
 
+	// 回复队列状态
+	replyQueues   map[string][]*replyQueueItem // 按 req_id 分组的回复队列，保证同一 req_id 串行发送
+	pendingAcks   map[string]*pendingAck       // 正在等待回执的 req_id，含超时定时器与序列号
+	pendingAckSeq int                          // 自增序列号，区分同一 reqId 的不同 pending，防超时与 ack 竞态
+	replyMu       sync.Mutex                   // 保护 replyQueues/pendingAcks/pendingAckSeq
+
 	// 回调
 	OnConnected        func()                      // 连接建立回调（WebSocket open 事件，认证尚未完成）
 	OnAuthenticated    func()                      // 认证成功回调
@@ -104,6 +110,8 @@ func NewWsConnectionManager(
 		maxMissedPong:          2,
 		reconnectMaxDelay:      30000,
 		authCh:                 make(chan authResult, 1),
+		replyQueues:            make(map[string][]*replyQueueItem),
+		pendingAcks:            make(map[string]*pendingAck),
 	}
 }
 
@@ -222,6 +230,8 @@ func (m *WsConnectionManager) readLoop() {
 				m.closed.Store(true)
 				reason := err.Error()
 				m.logger.Warn(fmt.Sprintf("WebSocket connection closed: %s", reason))
+				// 清理所有待处理回复（对应 Node close 事件中的 clearPendingMessages）
+				m.clearPendingMessages(fmt.Sprintf("WebSocket connection closed (%s)", reason))
 				if m.OnDisconnected != nil {
 					m.OnDisconnected(reason)
 				}
@@ -270,6 +280,14 @@ func (m *WsConnectionManager) handleFrame(raw json.RawMessage) {
 		// 心跳响应（req_id 以 ping 开头）— 任务 12 补充
 		if reqId != "" && len(reqId) >= 4 && reqId[:4] == types.WsCmd.Heartbeat {
 			m.handleHeartbeatResponse(probe.ErrCode, probe.ErrMsg)
+			return
+		}
+		// 回复消息回执（req_id 存在于 pendingAcks 中）— 任务 14 补充
+		m.replyMu.Lock()
+		_, hasPendingAck := m.pendingAcks[reqId]
+		m.replyMu.Unlock()
+		if hasPendingAck {
+			m.handleReplyAck(reqId, raw)
 			return
 		}
 		// 未知无 cmd 帧
@@ -478,6 +496,9 @@ func (m *WsConnectionManager) Disconnect() {
 	m.isManualClose = true
 	m.stopHeartbeat()
 
+	// 清理所有待处理回复（对应 Node disconnect 中的 clearPendingMessages）
+	m.clearPendingMessages("Connection manually closed")
+
 	// 取消挂起的重连定时器
 	if m.reconnectTimer != nil {
 		m.reconnectTimer.Stop()
@@ -583,4 +604,232 @@ func (m *WsConnectionManager) reconnect() {
 		m.logger.Error(fmt.Sprintf("Reconnect failed: %s", err.Error()))
 		m.scheduleReconnect()
 	}
+}
+
+// ========== 串行回复队列 + ack ==========
+
+// replyQueueItem 回复队列中的单个任务项，对应 Node ReplyQueueItem。
+type replyQueueItem struct {
+	frame any            // 要发送的帧数据
+	ackCh chan ackResult // 回执结果通道（成功传入回执帧，失败/超时传入错误）
+}
+
+// ackResult 回执结果，通过 replyQueueItem.ackCh 传递。
+type ackResult struct {
+	frame *types.WsFrame[json.RawMessage] // 回执帧（成功/errcode 非 0 时提供）
+	err   error                           // 错误（超时/errcode 非 0/发送失败）
+}
+
+// pendingAck 正在等待回执的状态，对应 Node pendingAcks 的 value。
+type pendingAck struct {
+	item  *replyQueueItem // 关联的队列项（即队首）
+	timer *time.Timer     // 回执超时定时器
+	seq   int             // 唯一序列号，用于超时回调校验是否是当前 pending
+}
+
+// SendReply 通过 WebSocket 通道发送回复消息（串行队列版本），对应 Node sendReply。
+//
+// 同一个 req_id 的消息会被放入队列中串行发送：发送一条后等待服务端回执，
+// 收到回执或超时后才发送下一条。阻塞至收到回执（返回回执帧）、超时或出错。
+//
+// 格式：{ cmd, headers: { req_id }, body }
+// cmd 为空时默认 WsCmd.Response。
+func (m *WsConnectionManager) SendReply(frame types.WsFrameHeaders, body any, cmd string) (*types.WsFrame[json.RawMessage], error) {
+	if cmd == "" {
+		cmd = types.WsCmd.Response
+	}
+	reqId := frame.ReqId
+
+	item := &replyQueueItem{
+		frame: map[string]any{
+			"cmd":     cmd,
+			"headers": map[string]string{"req_id": reqId},
+			"body":    body,
+		},
+		ackCh: make(chan ackResult, 1),
+	}
+
+	// 入队
+	m.replyMu.Lock()
+	queue := m.replyQueues[reqId]
+	// 防止队列无限增长导致内存泄漏
+	if len(queue) >= m.maxReplyQueueSize {
+		m.replyMu.Unlock()
+		err := fmt.Errorf("Reply queue for reqId %s exceeds max size (%d)", reqId, m.maxReplyQueueSize)
+		m.logger.Warn(err.Error())
+		return nil, err
+	}
+	queue = append(queue, item)
+	m.replyQueues[reqId] = queue
+	// 队列中只有这一条，说明当前空闲，立即开始处理
+	startProcessing := len(queue) == 1
+	m.replyMu.Unlock()
+
+	if startProcessing {
+		m.processReplyQueue(reqId)
+	}
+
+	// 阻塞等待回执
+	result := <-item.ackCh
+	return result.frame, result.err
+}
+
+// processReplyQueue 处理指定 req_id 的回复队列（即任务说明中的 replyProcessor），
+// 对应 Node processReplyQueue：取出队首消息发送，并注册 pendingAck 等待回执。
+//
+// 每次只处理一条：发送成功后注册 pending 并返回；回执/超时会触发下一次调用。
+// 发送失败时循环跳过当前项继续下一条，避免递归栈溢出。
+func (m *WsConnectionManager) processReplyQueue(reqId string) {
+	m.replyMu.Lock()
+	defer m.replyMu.Unlock()
+
+	for {
+		queue := m.replyQueues[reqId]
+		if len(queue) == 0 {
+			// 队列为空，清理
+			delete(m.replyQueues, reqId)
+			return
+		}
+
+		item := queue[0]
+
+		// 发送帧
+		if err := m.sendJSON(item.frame); err != nil {
+			m.logger.Error(fmt.Sprintf("Failed to send reply for reqId %s: %s", reqId, err.Error()))
+			// 发送失败：移除当前项并通知，继续处理下一条
+			m.replyQueues[reqId] = queue[1:]
+			item.ackCh <- ackResult{err: err}
+			continue
+		}
+
+		// 分配唯一序列号，用于超时回调校验是否是当前 pending（防竞态）
+		m.pendingAckSeq++
+		seq := m.pendingAckSeq
+
+		// 注册到 pendingAcks，并设置回执超时定时器
+		m.pendingAcks[reqId] = &pendingAck{
+			item: item,
+			seq:  seq,
+			timer: time.AfterFunc(time.Duration(m.replyAckTimeout)*time.Millisecond, func() {
+				m.handleReplyTimeout(reqId, seq)
+			}),
+		}
+		m.logger.Debug(fmt.Sprintf("Reply message sent via WebSocket, reqId: %s, queue length: %d", reqId, len(queue)))
+		// 等待回执；ack/超时后会再次触发 processReplyQueue 处理下一条
+		return
+	}
+}
+
+// handleReplyAck 处理回复消息的回执，对应 Node handleReplyAck。
+//
+// 收到回执后释放当前项，继续处理队列中的下一条。
+func (m *WsConnectionManager) handleReplyAck(reqId string, raw json.RawMessage) {
+	m.replyMu.Lock()
+	pending, ok := m.pendingAcks[reqId]
+	if !ok {
+		m.replyMu.Unlock()
+		return
+	}
+
+	// 清除超时定时器
+	pending.timer.Stop()
+	delete(m.pendingAcks, reqId)
+
+	item := pending.item
+	// 移除队首（即当前 pending 项）
+	if q := m.replyQueues[reqId]; len(q) > 0 && q[0] == item {
+		m.replyQueues[reqId] = q[1:]
+	}
+	m.replyMu.Unlock()
+
+	// 解析回执帧
+	var ack types.WsFrame[json.RawMessage]
+	result := ackResult{}
+	if err := json.Unmarshal(raw, &ack); err != nil {
+		result.err = fmt.Errorf("Failed to parse reply ack for reqId %s: %s", reqId, err.Error())
+		m.logger.Error(result.err.Error())
+	} else if ack.ErrCode != 0 {
+		// 失败：errcode 非 0，同时提供回执帧便于诊断
+		result.err = fmt.Errorf("Reply ack error: reqId=%s, errcode=%d, errmsg=%s", reqId, ack.ErrCode, ack.ErrMsg)
+		result.frame = &ack
+		m.logger.Warn(result.err.Error())
+	} else {
+		// 成功：回执帧
+		result.frame = &ack
+		m.logger.Debug(fmt.Sprintf("Reply ack received for reqId: %s", reqId))
+	}
+	item.ackCh <- result
+
+	// 继续处理队列中的下一条
+	m.processReplyQueue(reqId)
+}
+
+// handleReplyTimeout 处理回复回执超时，对应 Node processReplyQueue 中的超时分支。
+//
+// 通过 seq 校验：若不匹配说明当前 pending 已被正常 ack 处理过，直接忽略（过期回调）。
+func (m *WsConnectionManager) handleReplyTimeout(reqId string, seq int) {
+	m.replyMu.Lock()
+	pending, ok := m.pendingAcks[reqId]
+	if !ok || pending.seq != seq {
+		// 过期的超时回调，忽略
+		m.replyMu.Unlock()
+		return
+	}
+
+	delete(m.pendingAcks, reqId)
+	m.logger.Warn(fmt.Sprintf("Reply ack timeout (%dms) for reqId: %s", m.replyAckTimeout, reqId))
+
+	item := pending.item
+	// 移除队首（即当前 pending 项）
+	if q := m.replyQueues[reqId]; len(q) > 0 && q[0] == item {
+		m.replyQueues[reqId] = q[1:]
+	}
+	m.replyMu.Unlock()
+
+	// 超时：通知当前项失败
+	item.ackCh <- ackResult{err: fmt.Errorf("Reply ack timeout (%dms) for reqId: %s", m.replyAckTimeout, reqId)}
+
+	// 继续处理队列中的下一条
+	m.processReplyQueue(reqId)
+}
+
+// HasPendingAck 检查指定 reqId 是否有待回执的消息（即上一条消息还未收到 ack），
+// 对应 Node hasPendingAck。
+//
+// 用于流式场景：调用方可据此决定是否跳过当前帧，避免排队积压。
+func (m *WsConnectionManager) HasPendingAck(reqId string) bool {
+	m.replyMu.Lock()
+	defer m.replyMu.Unlock()
+	_, ok := m.pendingAcks[reqId]
+	return ok
+}
+
+// clearPendingMessages 清理所有待处理的消息和回执，对应 Node clearPendingMessages。
+//
+// 先清理 pendingAcks（正在等待回执的队首项），再清理 replyQueues（排队中的后续项），
+// 跳过已在 pendingAcks 中被 reject 的项，避免双重通知。
+func (m *WsConnectionManager) clearPendingMessages(reason string) {
+	m.replyMu.Lock()
+
+	// 先清理 pendingAcks：清除定时器并通知正在等待回执的消息
+	notified := make(map[*replyQueueItem]bool)
+	for reqId, pending := range m.pendingAcks {
+		pending.timer.Stop()
+		notified[pending.item] = true
+		pending.item.ackCh <- ackResult{err: fmt.Errorf("%s, reply for reqId: %s cancelled", reason, reqId)}
+	}
+	m.pendingAcks = make(map[string]*pendingAck)
+
+	// 再清理 replyQueues：跳过已在 pendingAcks 中被 reject 过的队首项
+	for reqId, queue := range m.replyQueues {
+		for _, item := range queue {
+			if notified[item] {
+				continue
+			}
+			item.ackCh <- ackResult{err: fmt.Errorf("%s, reply for reqId: %s cancelled", reason, reqId)}
+		}
+	}
+	m.replyQueues = make(map[string][]*replyQueueItem)
+
+	m.replyMu.Unlock()
 }

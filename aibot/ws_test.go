@@ -695,3 +695,317 @@ func TestDisconnectPreventsReconnect(t *testing.T) {
 		t.Error("isManualClose should be true after Disconnect")
 	}
 }
+
+// ========== 回复队列 + ack 集成测试 ==========
+
+// replyAckResponse 构造回复成功回执帧。
+func replyAckResponse(reqId string) []byte {
+	resp := map[string]any{
+		"headers": map[string]string{"req_id": reqId},
+		"errcode": 0,
+		"errmsg":  "ok",
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// replyAckErrorResponse 构造回复失败回执帧（errcode 非 0）。
+func replyAckErrorResponse(reqId string, code int, msg string) []byte {
+	resp := map[string]any{
+		"headers": map[string]string{"req_id": reqId},
+		"errcode": code,
+		"errmsg":  msg,
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// newAuthedMgr 创建并连接一个已认证的 WsConnectionManager，供回复测试复用。
+func newAuthedMgr(t *testing.T, onMessage func(msg []byte) []byte) (*WsConnectionManager, *mockWsServer) {
+	t.Helper()
+	srv := newMockWsServer(onMessage)
+	mgr := NewWsConnectionManager(
+		&DefaultLogger{}, 30000, 1000, 10, srv.url(), types.WsOptions{}, 500, 5,
+	)
+	mgr.SetCredentials("test_bot", "test_secret", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := mgr.Connect(ctx); err != nil {
+		srv.close()
+		t.Fatalf("Connect failed: %v", err)
+	}
+	return mgr, srv
+}
+
+// TestSendReplyAckSuccess 验证回复收到 ack 后解析成功。
+func TestSendReplyAckSuccess(t *testing.T) {
+	mgr, srv := newAuthedMgr(t, func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		if cmd == types.WsCmd.Response {
+			return replyAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+	defer mgr.Disconnect()
+
+	reqId := GenerateReqId(types.WsCmd.Response)
+	ack, err := mgr.SendReply(
+		types.WsFrameHeaders{ReqId: reqId},
+		map[string]any{"msgtype": "text", "text": map[string]string{"content": "hi"}},
+		types.WsCmd.Response,
+	)
+	if err != nil {
+		t.Fatalf("SendReply returned error: %v", err)
+	}
+	if ack == nil {
+		t.Fatal("ack frame is nil")
+	}
+	if ack.ErrCode != 0 {
+		t.Errorf("ack errcode = %d, want 0", ack.ErrCode)
+	}
+}
+
+// TestSendReplyTimeout 验证不回 ack 则超时报错。
+func TestSendReplyTimeout(t *testing.T) {
+	mgr, srv := newAuthedMgr(t, func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		// Response 帧不回复（模拟回执超时）
+		return nil
+	})
+	defer srv.close()
+	defer mgr.Disconnect()
+
+	mgr.replyAckTimeout = 200 // 缩短超时加速测试
+
+	reqId := GenerateReqId(types.WsCmd.Response)
+	_, err := mgr.SendReply(
+		types.WsFrameHeaders{ReqId: reqId},
+		map[string]any{"x": 1},
+		types.WsCmd.Response,
+	)
+	if err == nil {
+		t.Fatal("SendReply should timeout, got nil error")
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("error should mention timeout, got: %v", err)
+	}
+}
+
+// TestSendReplyAckError 验证 errcode 非 0 时报错。
+func TestSendReplyAckError(t *testing.T) {
+	mgr, srv := newAuthedMgr(t, func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Response {
+			return replyAckErrorResponse(reqId, 40002, "reply rejected")
+		}
+		return nil
+	})
+	defer srv.close()
+	defer mgr.Disconnect()
+
+	reqId := GenerateReqId(types.WsCmd.Response)
+	ack, err := mgr.SendReply(
+		types.WsFrameHeaders{ReqId: reqId},
+		map[string]any{"x": 1},
+		types.WsCmd.Response,
+	)
+	if err == nil {
+		t.Fatal("SendReply should return error on errcode!=0")
+	}
+	if ack == nil || ack.ErrCode != 40002 {
+		t.Errorf("ack frame errcode = %v (ack nil? %v), want 40002", ack, ack == nil)
+	}
+}
+
+// TestSendReplySerialOrder 验证同一 reqId 的回复串行发送：
+// 第一条回复延迟 ack，第二条必须等到第一条 ack 后才发送，因此服务端两次收帧间隔 ≥ 延迟。
+func TestSendReplySerialOrder(t *testing.T) {
+	var mu sync.Mutex
+	var firstSeen, secondSeen time.Time
+	seen := 0
+	mgr, srv := newAuthedMgr(t, func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		if cmd == types.WsCmd.Response {
+			mu.Lock()
+			seen++
+			n := seen
+			if n == 1 {
+				firstSeen = time.Now()
+			} else if n == 2 {
+				secondSeen = time.Now()
+			}
+			mu.Unlock()
+			if n == 1 {
+				time.Sleep(150 * time.Millisecond) // 第一条延迟 ack，验证第二条被阻塞
+			}
+			return replyAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+	defer mgr.Disconnect()
+
+	reqId := GenerateReqId(types.WsCmd.Response)
+	headers := types.WsFrameHeaders{ReqId: reqId}
+
+	// 并发发送两条回复（同一 reqId）
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err1 = mgr.SendReply(headers, map[string]any{"seq": 1}, types.WsCmd.Response)
+	}()
+	go func() {
+		defer wg.Done()
+		_, err2 = mgr.SendReply(headers, map[string]any{"seq": 2}, types.WsCmd.Response)
+	}()
+	wg.Wait()
+
+	if err1 != nil {
+		t.Errorf("first SendReply error: %v", err1)
+	}
+	if err2 != nil {
+		t.Errorf("second SendReply error: %v", err2)
+	}
+
+	mu.Lock()
+	gap := secondSeen.Sub(firstSeen)
+	mu.Unlock()
+	if gap < 100*time.Millisecond {
+		t.Errorf("replies not serial: gap between server receipts = %v, want >= 100ms", gap)
+	}
+}
+
+// TestSendReplyDefaultCmd 验证 cmd 为空时默认 WsCmd.Response。
+func TestSendReplyDefaultCmd(t *testing.T) {
+	var gotCmd string
+	var cmdMu sync.Mutex
+	mgr, srv := newAuthedMgr(t, func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		if cmd == types.WsCmd.Response {
+			cmdMu.Lock()
+			gotCmd = cmd
+			cmdMu.Unlock()
+			return replyAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+	defer mgr.Disconnect()
+
+	reqId := GenerateReqId(types.WsCmd.Response)
+	_, err := mgr.SendReply(types.WsFrameHeaders{ReqId: reqId}, map[string]any{"x": 1}, "")
+	if err != nil {
+		t.Fatalf("SendReply returned error: %v", err)
+	}
+	cmdMu.Lock()
+	defer cmdMu.Unlock()
+	if gotCmd != types.WsCmd.Response {
+		t.Errorf("default cmd = %q, want %q", gotCmd, types.WsCmd.Response)
+	}
+}
+
+// TestHasPendingAck 验证回复发送后、ack 前存在 pending。
+func TestHasPendingAck(t *testing.T) {
+	mgr, srv := newAuthedMgr(t, func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Response {
+			// 延迟 ack，确保能在 pending 窗口内检查
+			time.Sleep(100 * time.Millisecond)
+			return replyAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+	defer mgr.Disconnect()
+
+	reqId := GenerateReqId(types.WsCmd.Response)
+	done := make(chan struct{})
+	go func() {
+		_, _ = mgr.SendReply(types.WsFrameHeaders{ReqId: reqId}, map[string]any{"x": 1}, types.WsCmd.Response)
+		close(done)
+	}()
+
+	// 等待回复发送、pending 建立
+	time.Sleep(30 * time.Millisecond)
+	if !mgr.HasPendingAck(reqId) {
+		t.Error("HasPendingAck should be true while waiting for ack")
+	}
+
+	<-done
+	// ack 完成后应不再有 pending
+	if mgr.HasPendingAck(reqId) {
+		t.Error("HasPendingAck should be false after ack received")
+	}
+}
+
+// TestClearPendingOnDisconnect 验证断开连接时清理待处理回复，避免 goroutine 泄漏。
+func TestClearPendingOnDisconnect(t *testing.T) {
+	mgr, srv := newAuthedMgr(t, func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		// Response 帧不回复（保持 pending）
+		return nil
+	})
+	defer srv.close()
+
+	mgr.replyAckTimeout = 10000 // 足够长，确保由 disconnect 触发清理而非超时
+
+	reqId := GenerateReqId(types.WsCmd.Response)
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.SendReply(types.WsFrameHeaders{ReqId: reqId}, map[string]any{"x": 1}, types.WsCmd.Response)
+		done <- err
+	}()
+
+	// 等待回复入队并发送（pending 已建立）
+	time.Sleep(100 * time.Millisecond)
+	mgr.Disconnect()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("SendReply should return error after disconnect clears pending")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("SendReply did not return after disconnect (possible goroutine leak)")
+	}
+}
