@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/oceanopen/wecom-aibot-go-sdk/aibot/types"
@@ -32,6 +33,11 @@ type WsConnectionManager struct {
 	// 连接状态
 	ws     *websocket.Conn // 当前 WebSocket 连接
 	closed atomic.Bool     // 是否已断开（去重，防止 onDisconnected 双触发）
+
+	// 心跳状态
+	missedPongCount int         // 连续未收到心跳 ack 的次数
+	maxMissedPong   int         // 连续未 ack 最大次数，超过后视为连接死亡
+	heartbeatTimer  *time.Timer // 心跳定时器
 
 	// 配置
 	logger                 types.Logger
@@ -87,6 +93,7 @@ func NewWsConnectionManager(
 		wsOptions:              wsOptions,
 		maxReplyQueueSize:      maxReplyQueueSize,
 		replyAckTimeout:        5000,
+		maxMissedPong:          2,
 		authCh:                 make(chan authResult, 1),
 	}
 }
@@ -168,7 +175,8 @@ func (m *WsConnectionManager) setupEventHandlers() {
 		return
 	}
 
-	// 连接建立：发送认证帧
+	// 连接建立：重置心跳计数，发送认证帧
+	m.missedPongCount = 0
 	m.logger.Info("WebSocket connection established, sending auth...")
 	m.sendAuth()
 	if m.OnConnected != nil {
@@ -192,6 +200,7 @@ func (m *WsConnectionManager) readLoop() {
 		_, message, err := ws.ReadMessage()
 		if err != nil {
 			// 连接关闭或读取错误
+			m.stopHeartbeat()
 			if !m.closed.Load() {
 				m.closed.Store(true)
 				reason := err.Error()
@@ -282,6 +291,7 @@ func (m *WsConnectionManager) handleAuthResponse(errCode int, errMsg string) {
 	}
 
 	m.logger.Info("Authentication successful")
+	m.startHeartbeat()
 	// 发送认证成功结果
 	select {
 	case m.authCh <- authResult{Success: true}:
@@ -292,11 +302,67 @@ func (m *WsConnectionManager) handleAuthResponse(errCode int, errMsg string) {
 	}
 }
 
-// handleHeartbeatResponse 处理心跳响应，任务 12 补充完整逻辑。
+// handleHeartbeatResponse 处理心跳响应，对应 Node handleFrame 中心跳响应分支。
 func (m *WsConnectionManager) handleHeartbeatResponse(errCode int, errMsg string) {
-	_ = errCode
-	_ = errMsg
-	// 任务 12 补充：重置 missedPongCount
+	if errCode != 0 {
+		m.logger.Warn(fmt.Sprintf("Heartbeat ack error: errcode=%d, errmsg=%s", errCode, errMsg))
+		return
+	}
+	m.missedPongCount = 0
+}
+
+// startHeartbeat 启动心跳定时器，对应 Node startHeartbeat。
+func (m *WsConnectionManager) startHeartbeat() {
+	m.stopHeartbeat()
+	interval := time.Duration(m.heartbeatInterval) * time.Millisecond
+	m.heartbeatTimer = time.AfterFunc(interval, func() {
+		m.sendHeartbeat()
+		// 重新调度下一次心跳
+		if !m.closed.Load() {
+			m.startHeartbeat()
+		}
+	})
+	m.logger.Debug(fmt.Sprintf("Heartbeat timer started, interval: %dms", m.heartbeatInterval))
+}
+
+// stopHeartbeat 停止心跳定时器，对应 Node stopHeartbeat。
+func (m *WsConnectionManager) stopHeartbeat() {
+	if m.heartbeatTimer != nil {
+		m.heartbeatTimer.Stop()
+		m.heartbeatTimer = nil
+		m.logger.Debug("Heartbeat timer stopped")
+	}
+}
+
+// sendHeartbeat 发送心跳，对应 Node sendHeartbeat。
+//
+// 格式：{ cmd: "ping", headers: { req_id } }
+// 发送前检查 missedPongCount，若连续未 ack 次数达到 maxMissedPong 则视为连接死亡并强制断连。
+func (m *WsConnectionManager) sendHeartbeat() {
+	// 检查连续未收到 ack 的次数，在发送下一条心跳前判定连接是否死亡
+	if m.missedPongCount >= m.maxMissedPong {
+		m.logger.Warn(fmt.Sprintf("No heartbeat ack received for %d consecutive pings, connection considered dead", m.missedPongCount))
+		m.stopHeartbeat()
+		// 强制关闭底层 socket，触发 readLoop 退出
+		m.mu.Lock()
+		ws := m.ws
+		m.mu.Unlock()
+		if ws != nil {
+			ws.Close()
+		}
+		return
+	}
+
+	m.missedPongCount++
+	frame := map[string]any{
+		"cmd": types.WsCmd.Heartbeat,
+		"headers": map[string]string{
+			"req_id": GenerateReqId(types.WsCmd.Heartbeat),
+		},
+	}
+	if err := m.sendJSON(frame); err != nil {
+		m.logger.Error(fmt.Sprintf("Failed to send heartbeat: %s", err.Error()))
+	}
 }
 
 // sendAuth 发送认证帧，对应 Node sendAuth。
@@ -358,6 +424,8 @@ func (m *WsConnectionManager) disconnect(reason string) {
 	if m.closed.Swap(true) {
 		return // 已经断开，避免双触发
 	}
+
+	m.stopHeartbeat()
 
 	m.mu.Lock()
 	ws := m.ws

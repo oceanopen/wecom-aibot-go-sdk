@@ -360,6 +360,147 @@ func isAuthError(err error, target **AuthError) bool {
 	return false
 }
 
+// heartbeatAckResponse 构造心跳 ack 响应帧。
+func heartbeatAckResponse(reqId string) []byte {
+	resp := map[string]any{
+		"headers": map[string]string{"req_id": reqId},
+		"errcode": 0,
+		"errmsg":  "ok",
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// ========== 心跳集成测试 ==========
+
+func TestHeartbeatAckResetsCount(t *testing.T) {
+	// Mock 服务端：收到认证帧回 ok，收到心跳帧回 ack
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+
+	mgr := NewWsConnectionManager(
+		&DefaultLogger{}, 30000, 1000, 10, srv.url(), types.WsOptions{}, 500, 5,
+	)
+	mgr.SetCredentials("test_bot", "test_secret", nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := mgr.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// 连接成功后 missedPongCount 应为 0
+	if mgr.missedPongCount != 0 {
+		t.Errorf("missedPongCount = %d, want 0 after auth", mgr.missedPongCount)
+	}
+
+	// 等待几轮心跳（心跳间隔 30s，这里验证状态即可）
+	// 心跳已启动，missedPongCount 仍应为 0（因为 mock 回了 ack）
+	time.Sleep(200 * time.Millisecond)
+	if mgr.missedPongCount > mgr.maxMissedPong {
+		t.Errorf("missedPongCount = %d, should not exceed maxMissedPong=%d with ack", mgr.missedPongCount, mgr.maxMissedPong)
+	}
+
+	mgr.Disconnect()
+}
+
+func TestHeartbeatMissedPongDisconnect(t *testing.T) {
+	// Mock 服务端：收到认证帧回 ok，收到心跳帧不回 ack（模拟心跳超时）
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		// 心跳帧不回复
+		return nil
+	})
+	defer srv.close()
+
+	// 用较短的心跳间隔加速测试（100ms）
+	mgr := NewWsConnectionManager(
+		&DefaultLogger{}, 100, 1000, 10, srv.url(), types.WsOptions{}, 500, 5,
+	)
+	mgr.SetCredentials("test_bot", "test_secret", nil)
+
+	var disconnected bool
+	var disconnectMu sync.Mutex
+	mgr.OnDisconnected = func(reason string) {
+		disconnectMu.Lock()
+		disconnected = true
+		disconnectMu.Unlock()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := mgr.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// 等待足够时间让心跳超时触发断连（maxMissedPong=2, interval=100ms, 等待 ~500ms）
+	time.Sleep(500 * time.Millisecond)
+
+	disconnectMu.Lock()
+	wasDisconnected := disconnected
+	disconnectMu.Unlock()
+
+	if !wasDisconnected {
+		t.Error("expected disconnect due to missed heartbeat ack, but OnDisconnected was not called")
+	}
+}
+
+func TestStopHeartbeatOnDisconnect(t *testing.T) {
+	// 验证 Disconnect 后心跳定时器停止
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+
+	mgr := NewWsConnectionManager(
+		&DefaultLogger{}, 30000, 1000, 10, srv.url(), types.WsOptions{}, 500, 5,
+	)
+	mgr.SetCredentials("test_bot", "test_secret", nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := mgr.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// 心跳应已启动
+	if mgr.heartbeatTimer == nil {
+		t.Error("heartbeatTimer should be non-nil after auth")
+	}
+
+	mgr.Disconnect()
+
+	// 断开后心跳定时器应已停止
+	if mgr.heartbeatTimer != nil {
+		t.Error("heartbeatTimer should be nil after Disconnect")
+	}
+}
+
 // DefaultLogger 用于测试的 stub（如果 logger.go 已有 DefaultLogger 则直接用）。
 // 此处仅做编译保证，实际使用 aibot.DefaultLogger。
 var _ = fmt.Sprintf
