@@ -4,7 +4,7 @@ package aibot
 //
 // 任务 15：MessageHandler 结构 + 构造。
 // 任务 16：按 cmd+msgtype 二次解码分发（文本 OnText + 事件 OnEvent）。
-// 任务 19：补全其余消息类型（OnImage/OnMixed/OnVoice/OnFile/OnVideo）与类型化事件分发。
+// 任务 19：补全其余消息类型（OnImage/OnMixed/OnVoice/OnFile/OnVideo）与类型化事件分发（OnEnterChat 等）。
 
 import (
 	"encoding/json"
@@ -32,7 +32,6 @@ func NewMessageHandler(logger types.Logger) *MessageHandler {
 //   - 事件推送：{ cmd: "aibot_event_callback", headers: { req_id }, body: { msgid, msgtype: "event", event: { ... } } }
 //
 // 先用探针解析 cmd + body.msgtype 路由：事件推送 → handleEventCallback；消息推送 → handleMessageCallback。
-// 任务 16 实现文本（OnText）与事件（OnEvent）分发，任务 19 补全其余类型。
 func (h *MessageHandler) HandleFrame(raw json.RawMessage, client *WsClient) {
 	// 探针：解析 cmd 与 body.msgtype（避免对未知帧整体解码）
 	var probe struct {
@@ -65,7 +64,6 @@ func (h *MessageHandler) HandleFrame(raw json.RawMessage, client *WsClient) {
 // handleMessageCallback 处理消息推送（aibot_msg_callback），对应 Node handleMessageCallback。
 //
 // 先触发通用 OnMessage（body 解析为 BaseMessage），再按 msgtype 触发类型化回调。
-// 任务 16 仅实现文本（OnText）；其余类型（OnImage/OnMixed/...）任务 19 补全。
 func (h *MessageHandler) handleMessageCallback(raw json.RawMessage, client *WsClient, msgtype string) {
 	// 通用消息事件：以 BaseMessage 解析
 	var baseFrame types.WsFrame[types.BaseMessage]
@@ -80,14 +78,17 @@ func (h *MessageHandler) handleMessageCallback(raw json.RawMessage, client *WsCl
 	// 按 msgtype 触发特定事件
 	switch msgtype {
 	case types.MessageType.Text:
-		if client.OnText != nil {
-			var textFrame types.WsFrame[types.TextMessage]
-			if err := json.Unmarshal(raw, &textFrame); err != nil {
-				h.logger.Error(fmt.Sprintf("Failed to parse text message: %s", err.Error()))
-				return
-			}
-			client.OnText(&textFrame)
-		}
+		dispatchTyped(client.OnText, raw, h.logger, "text message")
+	case types.MessageType.Image:
+		dispatchTyped(client.OnImage, raw, h.logger, "image message")
+	case types.MessageType.Mixed:
+		dispatchTyped(client.OnMixed, raw, h.logger, "mixed message")
+	case types.MessageType.Voice:
+		dispatchTyped(client.OnVoice, raw, h.logger, "voice message")
+	case types.MessageType.File:
+		dispatchTyped(client.OnFile, raw, h.logger, "file message")
+	case types.MessageType.Video:
+		dispatchTyped(client.OnVideo, raw, h.logger, "video message")
 	default:
 		h.logger.Debug(fmt.Sprintf("Received unhandled message type: %s", msgtype))
 	}
@@ -95,16 +96,61 @@ func (h *MessageHandler) handleMessageCallback(raw json.RawMessage, client *WsCl
 
 // handleEventCallback 处理事件推送（aibot_event_callback），对应 Node handleEventCallback。
 //
-// 触发通用 OnEvent（body 解析为 EventMessage）。任务 19 补全类型化事件分发（OnEnterChat 等）。
+// 先触发通用 OnEvent（body 解析为 EventMessage），再按 eventtype 触发类型化事件回调。
+// DecodeEvent 同时填充 eventFrame.Body.Event，回调内可直接访问。
 func (h *MessageHandler) handleEventCallback(raw json.RawMessage, client *WsClient) {
 	var eventFrame types.WsFrame[types.EventMessage]
 	if err := json.Unmarshal(raw, &eventFrame); err != nil {
 		h.logger.Error(fmt.Sprintf("Failed to parse event body: %s", err.Error()))
 		return
 	}
+
+	// 通用事件回调
 	if client.OnEvent != nil {
 		client.OnEvent(&eventFrame)
 	}
+
+	// 按 eventtype 触发类型化事件（DecodeEvent 返回具体事件类型并填充 Body.Event）
+	event := eventFrame.Body.DecodeEvent()
+	eventType := ""
+	if event != nil {
+		eventType = event.GetEventType()
+	}
+	switch eventType {
+	case types.EventType.EnterChat:
+		if client.OnEnterChat != nil {
+			client.OnEnterChat(&eventFrame)
+		}
+	case types.EventType.TemplateCardEvent:
+		if client.OnTemplateCardEvent != nil {
+			client.OnTemplateCardEvent(&eventFrame)
+		}
+	case types.EventType.FeedbackEvent:
+		if client.OnFeedbackEvent != nil {
+			client.OnFeedbackEvent(&eventFrame)
+		}
+	case types.EventType.Disconnected:
+		if client.OnDisconnectedEvent != nil {
+			client.OnDisconnectedEvent(&eventFrame)
+		}
+	case "":
+		h.logger.Debug(fmt.Sprintf("Received event callback without eventtype: %s", truncateFrame(raw, 200)))
+	default:
+		h.logger.Debug(fmt.Sprintf("Received unhandled event type: %s", eventType))
+	}
+}
+
+// dispatchTyped 将原始帧解码为 WsFrame[T] 并触发回调（回调为 nil 时跳过），减少各 msgtype 分支的重复代码。
+func dispatchTyped[T any](cb func(*types.WsFrame[T]), raw json.RawMessage, logger types.Logger, label string) {
+	if cb == nil {
+		return
+	}
+	var frame types.WsFrame[T]
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		logger.Error(fmt.Sprintf("Failed to parse %s: %s", label, err.Error()))
+		return
+	}
+	cb(&frame)
 }
 
 // truncateFrame 截断帧 JSON 用于日志，对应 Node JSON.stringify(frame).substring(0, 200)。

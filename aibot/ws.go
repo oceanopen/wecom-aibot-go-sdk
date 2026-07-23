@@ -304,12 +304,61 @@ func (m *WsConnectionManager) handleFrame(raw json.RawMessage) {
 		}
 	case types.WsCmd.EventCallback:
 		m.logger.Debug(fmt.Sprintf("[server -> plugin] cmd=%s, reqId=%s", probe.Cmd, reqId))
+		// disconnected_event：有新连接建立，服务端通知旧连接即将被断开（任务 19）
+		if isDisconnectedEvent(raw) {
+			m.logger.Warn("Received disconnected_event: a new connection has been established, this connection will be closed by server")
+			// 先分发事件给上层（OnEvent/OnDisconnectedEvent），再做清理与断连
+			if m.OnMessage != nil {
+				m.OnMessage(raw)
+			}
+			m.handleServerDisconnect("New connection established, server disconnected this connection")
+			return
+		}
 		if m.OnMessage != nil {
 			m.OnMessage(raw)
 		}
 	default:
 		m.logger.Warn(fmt.Sprintf("Received unknown cmd: %s", probe.Cmd))
 	}
+}
+
+// handleServerDisconnect 处理 disconnected_event：服务端因新连接建立主动断开旧连接，
+// 对应 Node ws.ts handleFrame 中 disconnected_event 分支。
+//
+// 顺序：stopHeartbeat → clearPendingMessages → 置 isManualClose（阻止重连）→
+// 置 closed（防止 readLoop 错误路径双触发 onDisconnected）→ OnServerDisconnect → 关闭 socket。
+func (m *WsConnectionManager) handleServerDisconnect(reason string) {
+	m.stopHeartbeat()
+	m.clearPendingMessages("Server disconnected due to new connection")
+	// 阻止自动重连（服务端正常行为，重连也会被再次断开）
+	m.isManualClose = true
+	// 置 closed 标记，避免 ws.Close 触发 readLoop 错误路径再次触发 onDisconnected
+	m.closed.Store(true)
+	if m.OnServerDisconnect != nil {
+		m.OnServerDisconnect(reason)
+	}
+	m.mu.Lock()
+	ws := m.ws
+	m.ws = nil
+	m.mu.Unlock()
+	if ws != nil {
+		ws.Close()
+	}
+}
+
+// isDisconnectedEvent 判断帧是否为 disconnected_event 事件推送。
+func isDisconnectedEvent(raw json.RawMessage) bool {
+	var probe struct {
+		Body struct {
+			Event struct {
+				EventType string `json:"eventtype"`
+			} `json:"event"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return probe.Body.Event.EventType == types.EventType.Disconnected
 }
 
 // handleAuthResponse 处理认证响应，对应 Node handleFrame 中认证响应分支。

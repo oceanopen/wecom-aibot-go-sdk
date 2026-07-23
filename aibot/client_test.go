@@ -528,3 +528,85 @@ func TestReplyDefaultCmd(t *testing.T) {
 		t.Errorf("default cmd = %q, want %q", gotCmd, types.WsCmd.Response)
 	}
 }
+
+// ========== 任务 19：disconnected_event 不重连 ==========
+
+// TestDisconnectedEventNoReconnect 验证服务端推送 disconnected_event 后：
+// OnDisconnectedEvent/OnDisconnected 触发，且不自动重连（isManualClose 阻止）。
+func TestDisconnectedEventNoReconnect(t *testing.T) {
+	dcFrame := map[string]any{
+		"cmd":     types.WsCmd.EventCallback,
+		"headers": map[string]string{"req_id": "dc_1"},
+		"body": map[string]any{
+			"msgid": "dc", "msgtype": "event",
+			"event": map[string]string{"eventtype": "disconnected_event"},
+		},
+	}
+	dcData, _ := json.Marshal(dcFrame)
+
+	var srv *mockWsServer
+	srv = newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			// 认证成功后推送 disconnected_event
+			go func() {
+				time.Sleep(80 * time.Millisecond)
+				_ = srv.writePush(dcData)
+			}()
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+
+	var mu sync.Mutex
+	var gotDisconnectedEvent, gotDisconnected, gotReconnecting bool
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url()})
+	client.OnDisconnectedEvent = func(*types.WsFrame[types.EventMessage]) {
+		mu.Lock()
+		gotDisconnectedEvent = true
+		mu.Unlock()
+	}
+	client.OnDisconnected = func(reason string) {
+		mu.Lock()
+		gotDisconnected = true
+		mu.Unlock()
+	}
+	client.OnReconnecting = func(attempt int) {
+		mu.Lock()
+		gotReconnecting = true
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// 等待 disconnected_event 推送与处理
+	time.Sleep(400 * time.Millisecond)
+
+	mu.Lock()
+	wasDE := gotDisconnectedEvent
+	wasD := gotDisconnected
+	wasR := gotReconnecting
+	mu.Unlock()
+
+	if !wasDE {
+		t.Error("OnDisconnectedEvent should fire for disconnected_event frame")
+	}
+	if !wasD {
+		t.Error("OnDisconnected should fire (via OnServerDisconnect bridge)")
+	}
+	if wasR {
+		t.Error("should NOT reconnect after disconnected_event (isManualClose)")
+	}
+	if client.IsConnected() {
+		t.Error("client should be disconnected after disconnected_event")
+	}
+}

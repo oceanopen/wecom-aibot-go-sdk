@@ -2,6 +2,8 @@ package aibot
 
 import (
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/oceanopen/wecom-aibot-go-sdk/aibot/types"
@@ -162,4 +164,125 @@ func TestHandleNilCallbacks(t *testing.T) {
 	}`)
 	client := newHandlerClient()                   // 所有回调为 nil
 	client.messageHandler.HandleFrame(raw, client) // 不应 panic
+}
+
+// ========== 任务 19：其余消息/事件类型分发 ==========
+
+// TestHandleMessageTypesDispatch 验证各 msgtype 触发对应类型化回调。
+func TestHandleMessageTypesDispatch(t *testing.T) {
+	client := newHandlerClient()
+	var mu sync.Mutex
+	fired := ""
+	set := func(name string) { mu.Lock(); fired = name; mu.Unlock() }
+
+	client.OnText = func(*types.WsFrame[types.TextMessage]) { set("text") }
+	client.OnImage = func(*types.WsFrame[types.ImageMessage]) { set("image") }
+	client.OnMixed = func(*types.WsFrame[types.MixedMessage]) { set("mixed") }
+	client.OnVoice = func(*types.WsFrame[types.VoiceMessage]) { set("voice") }
+	client.OnFile = func(*types.WsFrame[types.FileMessage]) { set("file") }
+	client.OnVideo = func(*types.WsFrame[types.VideoMessage]) { set("video") }
+
+	cases := []struct{ msgtype, want string }{
+		{"text", "text"},
+		{"image", "image"},
+		{"mixed", "mixed"},
+		{"voice", "voice"},
+		{"file", "file"},
+		{"video", "video"},
+	}
+	for _, c := range cases {
+		mu.Lock()
+		fired = ""
+		mu.Unlock()
+		raw := json.RawMessage(fmt.Sprintf(
+			`{"cmd":"aibot_msg_callback","headers":{"req_id":"r"},"body":{"msgid":"m","msgtype":%q}}`,
+			c.msgtype,
+		))
+		client.messageHandler.HandleFrame(raw, client)
+		mu.Lock()
+		got := fired
+		mu.Unlock()
+		if got != c.want {
+			t.Errorf("msgtype=%s fired %q, want %q", c.msgtype, got, c.want)
+		}
+	}
+}
+
+// TestHandleTypedMessageBody 验证类型化回调 body 正确（以 image 为例）。
+func TestHandleTypedMessageBody(t *testing.T) {
+	raw := json.RawMessage(`{
+		"cmd": "aibot_msg_callback",
+		"headers": {"req_id": "req_img_body"},
+		"body": {"msgid": "img1", "aibotid": "bot1", "msgtype": "image", "image": {"media_id": "mid123"}}
+	}`)
+	client := newHandlerClient()
+
+	var gotMsgId string
+	client.OnImage = func(f *types.WsFrame[types.ImageMessage]) {
+		gotMsgId = f.Body.MsgId
+	}
+	client.messageHandler.HandleFrame(raw, client)
+	if gotMsgId != "img1" {
+		t.Errorf("OnImage body.msgid = %q, want img1", gotMsgId)
+	}
+}
+
+// TestHandleEventTypesDispatch 验证各 eventtype 触发对应类型化事件回调。
+func TestHandleEventTypesDispatch(t *testing.T) {
+	client := newHandlerClient()
+	var mu sync.Mutex
+	fired := ""
+	set := func(name string) { mu.Lock(); fired = name; mu.Unlock() }
+
+	client.OnEvent = func(*types.WsFrame[types.EventMessage]) { set("event") }
+	client.OnEnterChat = func(*types.WsFrame[types.EventMessage]) { set("enter_chat") }
+	client.OnTemplateCardEvent = func(*types.WsFrame[types.EventMessage]) { set("template_card_event") }
+	client.OnFeedbackEvent = func(*types.WsFrame[types.EventMessage]) { set("feedback_event") }
+	client.OnDisconnectedEvent = func(*types.WsFrame[types.EventMessage]) { set("disconnected_event") }
+
+	cases := []struct{ eventtype, want string }{
+		{"enter_chat", "enter_chat"},
+		{"template_card_event", "template_card_event"},
+		{"feedback_event", "feedback_event"},
+		{"disconnected_event", "disconnected_event"},
+	}
+	for _, c := range cases {
+		mu.Lock()
+		fired = ""
+		mu.Unlock()
+		raw := json.RawMessage(fmt.Sprintf(
+			`{"cmd":"aibot_event_callback","headers":{"req_id":"r"},"body":{"msgid":"e","msgtype":"event","event":{"eventtype":%q}}}`,
+			c.eventtype,
+		))
+		client.messageHandler.HandleFrame(raw, client)
+		mu.Lock()
+		got := fired
+		mu.Unlock()
+		// OnEvent 先触发（set "event"），随后类型化回调覆盖
+		if got != c.want {
+			t.Errorf("eventtype=%s fired %q, want %q", c.eventtype, got, c.want)
+		}
+	}
+}
+
+// TestHandleTemplateCardEventBody 验证类型化事件回调 body 正确（以 template_card_event 为例）。
+func TestHandleTemplateCardEventBody(t *testing.T) {
+	raw := json.RawMessage(`{
+		"cmd": "aibot_event_callback",
+		"headers": {"req_id": "req_tc"},
+		"body": {"msgid": "tc1", "msgtype": "event", "event": {"eventtype": "template_card_event", "event_key": "btn1", "task_id": "t1"}}
+	}`)
+	client := newHandlerClient()
+
+	var gotKey string
+	client.OnTemplateCardEvent = func(f *types.WsFrame[types.EventMessage]) {
+		tc, ok := f.Body.Event.(types.TemplateCardEventData)
+		if ok {
+			gotKey = tc.EventKey
+		}
+	}
+	client.messageHandler.HandleFrame(raw, client)
+	if gotKey != "btn1" {
+		t.Errorf("template_card_event event_key = %q, want btn1", gotKey)
+	}
 }
