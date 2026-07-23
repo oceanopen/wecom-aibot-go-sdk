@@ -39,6 +39,14 @@ type WsConnectionManager struct {
 	maxMissedPong   int         // 连续未 ack 最大次数，超过后视为连接死亡
 	heartbeatTimer  *time.Timer // 心跳定时器
 
+	// 重连状态
+	reconnectAttempts    int         // 连接断开重连次数
+	authFailureAttempts  int         // 认证失败重试次数
+	isManualClose        bool        // 是否主动关闭（阻止自动重连）
+	lastCloseWasAuthFail bool        // 最近一次关闭是否因认证失败（用于 scheduleReconnect 区分重连类型）
+	reconnectTimer       *time.Timer // 重连定时器
+	reconnectMaxDelay    int         // 重连延迟上限（毫秒）
+
 	// 配置
 	logger                 types.Logger
 	wsUrl                  string
@@ -94,6 +102,7 @@ func NewWsConnectionManager(
 		maxReplyQueueSize:      maxReplyQueueSize,
 		replyAckTimeout:        5000,
 		maxMissedPong:          2,
+		reconnectMaxDelay:      30000,
 		authCh:                 make(chan authResult, 1),
 	}
 }
@@ -112,7 +121,14 @@ func (m *WsConnectionManager) SetCredentials(botId, botSecret string, extraAuthP
 // 与 Node 版本不同，Go 版本阻塞等待认证结果，更符合 Go 惯例。
 // ctx 取消时中断等待并关闭连接。
 func (m *WsConnectionManager) Connect(ctx context.Context) error {
+	m.isManualClose = false
 	m.closed.Store(false)
+
+	// 取消挂起的重连定时器，防止与当前 Connect 竞态
+	if m.reconnectTimer != nil {
+		m.reconnectTimer.Stop()
+		m.reconnectTimer = nil
+	}
 
 	// 拨号
 	if err := m.connectOnce(); err != nil {
@@ -175,8 +191,9 @@ func (m *WsConnectionManager) setupEventHandlers() {
 		return
 	}
 
-	// 连接建立：重置心跳计数，发送认证帧
+	// 连接建立：重置心跳计数和认证失败标记，发送认证帧
 	m.missedPongCount = 0
+	m.lastCloseWasAuthFail = false
 	m.logger.Info("WebSocket connection established, sending auth...")
 	m.sendAuth()
 	if m.OnConnected != nil {
@@ -207,6 +224,10 @@ func (m *WsConnectionManager) readLoop() {
 				m.logger.Warn(fmt.Sprintf("WebSocket connection closed: %s", reason))
 				if m.OnDisconnected != nil {
 					m.OnDisconnected(reason)
+				}
+				// 非主动关闭时触发重连
+				if !m.isManualClose {
+					m.scheduleReconnect()
 				}
 			}
 			return
@@ -285,12 +306,22 @@ func (m *WsConnectionManager) handleAuthResponse(errCode int, errMsg string) {
 		case m.authCh <- authResult{Success: false, ErrMsg: errMsg}:
 		default:
 		}
-		// 认证失败，关闭连接
-		m.disconnect("authentication failed")
+		// 标记为认证失败，readLoop 退出后 scheduleReconnect 会据此使用 authFailureAttempts 计数器
+		m.lastCloseWasAuthFail = true
+		// 认证失败，关闭底层连接，触发 readLoop 退出进而 scheduleReconnect
+		m.mu.Lock()
+		ws := m.ws
+		m.mu.Unlock()
+		if ws != nil {
+			ws.Close()
+		}
 		return
 	}
 
 	m.logger.Info("Authentication successful")
+	// 认证成功：重置所有重连计数器
+	m.reconnectAttempts = 0
+	m.authFailureAttempts = 0
 	m.startHeartbeat()
 	// 发送认证成功结果
 	select {
@@ -444,6 +475,15 @@ func (m *WsConnectionManager) disconnect(reason string) {
 
 // Disconnect 主动断开连接（公开方法），对应 Node disconnect。
 func (m *WsConnectionManager) Disconnect() {
+	m.isManualClose = true
+	m.stopHeartbeat()
+
+	// 取消挂起的重连定时器
+	if m.reconnectTimer != nil {
+		m.reconnectTimer.Stop()
+		m.reconnectTimer = nil
+	}
+
 	m.disconnect("manual close")
 }
 
@@ -468,3 +508,79 @@ func (e *AuthError) Error() string { return e.Msg }
 type NotConnectedError struct{}
 
 func (e *NotConnectedError) Error() string { return "WebSocket not connected" }
+
+// scheduleReconnect 安排重连，对应 Node scheduleReconnect。
+//
+// 区分两种重连场景，使用独立的计数器和最大重试次数：
+//   - 认证失败（lastCloseWasAuthFail=true）：使用 authFailureAttempts / maxAuthFailureAttempts
+//   - 连接断开（lastCloseWasAuthFail=false）：使用 reconnectAttempts / maxReconnectAttempts
+//
+// disconnected_event（被踢下线）不会触发重连，因为 isManualClose 已被设为 true。
+func (m *WsConnectionManager) scheduleReconnect() {
+	if m.lastCloseWasAuthFail {
+		// 认证失败场景
+		if m.maxAuthFailureAttempts != -1 && m.authFailureAttempts >= m.maxAuthFailureAttempts {
+			m.logger.Error(fmt.Sprintf("Max auth failure attempts reached (%d), giving up", m.maxAuthFailureAttempts))
+			if m.OnError != nil {
+				m.OnError(types.NewWsAuthFailureError(m.maxAuthFailureAttempts))
+			}
+			return
+		}
+		m.authFailureAttempts++
+
+		delay := m.reconnectBaseDelay * (1 << (m.authFailureAttempts - 1)) // 2^(n-1)
+		if delay > m.reconnectMaxDelay {
+			delay = m.reconnectMaxDelay
+		}
+
+		m.logger.Info(fmt.Sprintf("Auth failed, reconnecting in %dms (auth attempt %d/%d)...", delay, m.authFailureAttempts, m.maxAuthFailureAttempts))
+		if m.OnReconnecting != nil {
+			m.OnReconnecting(m.authFailureAttempts)
+		}
+
+		m.reconnectTimer = time.AfterFunc(time.Duration(delay)*time.Millisecond, func() {
+			m.reconnectTimer = nil
+			if m.isManualClose {
+				return
+			}
+			m.reconnect()
+		})
+	} else {
+		// 连接断开场景（网络异常、心跳超时等）
+		if m.maxReconnectAttempts != -1 && m.reconnectAttempts >= m.maxReconnectAttempts {
+			m.logger.Error(fmt.Sprintf("Max reconnect attempts reached (%d), giving up", m.maxReconnectAttempts))
+			if m.OnError != nil {
+				m.OnError(types.NewWsReconnectExhaustedError(m.maxReconnectAttempts))
+			}
+			return
+		}
+		m.reconnectAttempts++
+
+		delay := m.reconnectBaseDelay * (1 << (m.reconnectAttempts - 1)) // 2^(n-1)
+		if delay > m.reconnectMaxDelay {
+			delay = m.reconnectMaxDelay
+		}
+
+		m.logger.Info(fmt.Sprintf("Connection lost, reconnecting in %dms (attempt %d/%d)...", delay, m.reconnectAttempts, m.maxReconnectAttempts))
+		if m.OnReconnecting != nil {
+			m.OnReconnecting(m.reconnectAttempts)
+		}
+
+		m.reconnectTimer = time.AfterFunc(time.Duration(delay)*time.Millisecond, func() {
+			m.reconnectTimer = nil
+			if m.isManualClose {
+				return
+			}
+			m.reconnect()
+		})
+	}
+}
+
+// reconnect 执行一次重连：重新拨号并发送认证帧。
+func (m *WsConnectionManager) reconnect() {
+	m.closed.Store(false)
+	if err := m.connectOnce(); err != nil {
+		m.logger.Error(fmt.Sprintf("Reconnect failed: %s", err.Error()))
+		m.scheduleReconnect()
+	}
+}

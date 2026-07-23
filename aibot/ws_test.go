@@ -504,3 +504,194 @@ func TestStopHeartbeatOnDisconnect(t *testing.T) {
 // DefaultLogger 用于测试的 stub（如果 logger.go 已有 DefaultLogger 则直接用）。
 // 此处仅做编译保证，实际使用 aibot.DefaultLogger。
 var _ = fmt.Sprintf
+
+// ========== 重连集成测试 ==========
+
+func TestReconnectOnConnectionLost(t *testing.T) {
+	// 使用两个 mock 服务端模拟断连重连：首次连接到 srv1，断开后重连到 srv2
+	srv2 := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		if cmd == types.WsCmd.Heartbeat {
+			return heartbeatAckResponse(reqId)
+		}
+		return nil
+	})
+	defer srv2.close()
+
+	var reconnecting bool
+	var reconnMu sync.Mutex
+
+	mgr := NewWsConnectionManager(
+		&DefaultLogger{}, 30000, 100, 10, srv2.url(), types.WsOptions{}, 500, 5,
+	)
+	mgr.SetCredentials("test_bot", "test_secret", nil)
+
+	mgr.OnReconnecting = func(attempt int) {
+		reconnMu.Lock()
+		reconnecting = true
+		reconnMu.Unlock()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := mgr.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// 强制关闭底层连接，模拟连接断开
+	mgr.mu.Lock()
+	ws := mgr.ws
+	mgr.mu.Unlock()
+	if ws != nil {
+		ws.Close()
+	}
+
+	// 等待重连触发
+	time.Sleep(300 * time.Millisecond)
+
+	reconnMu.Lock()
+	wasReconnecting := reconnecting
+	reconnMu.Unlock()
+	if !wasReconnecting {
+		t.Error("expected OnReconnecting to be called after connection loss")
+	}
+}
+
+func TestAuthFailureExhausted(t *testing.T) {
+	// Mock 服务端：所有认证请求都失败 → 认证耗尽
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authFailureResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+
+	mgr := NewWsConnectionManager(
+		&DefaultLogger{}, 30000, 50, 10, srv.url(), types.WsOptions{}, 500, 3,
+	)
+	mgr.SetCredentials("test_bot", "wrong_secret", nil)
+
+	var gotAuthExhausted bool
+	var errMu sync.Mutex
+	mgr.OnError = func(err error) {
+		errMu.Lock()
+		defer errMu.Unlock()
+		if _, ok := err.(*types.WsAuthFailureError); ok {
+			gotAuthExhausted = true
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Connect 会因首次认证失败返回(返回错误
+	_ = mgr.Connect(ctx)
+
+	// 等待重连+认证耗尽（3次认证失败，每次退避50/100/200ms）
+	time.Sleep(500 * time.Millisecond)
+
+	errMu.Lock()
+	wasExhausted := gotAuthExhausted
+	errMu.Unlock()
+	if !wasExhausted {
+		t.Error("expected WsAuthFailureError when auth attempts exhausted, but OnError was not called with it")
+	}
+}
+
+func TestReconnectExhausted(t *testing.T) {
+	// 直接测试 scheduleReconnect 的耗尽逻辑：设置 maxReconnectAttempts=2，
+	// 手动触发多次 scheduleReconnect 验证耗尽后 OnError 收到 WsReconnectExhaustedError
+	srv := newMockWsServer(func(msg []byte) []byte {
+		return nil
+	})
+	defer srv.close()
+
+	mgr := NewWsConnectionManager(
+		&DefaultLogger{}, 30000, 50, 2, srv.url(), types.WsOptions{}, 500, 5,
+	)
+	mgr.SetCredentials("test_bot", "test_secret", nil)
+
+	var gotReconnectExhausted bool
+	var errMu sync.Mutex
+	mgr.OnError = func(err error) {
+		errMu.Lock()
+		defer errMu.Unlock()
+		if _, ok := err.(*types.WsReconnectExhaustedError); ok {
+			gotReconnectExhausted = true
+		}
+	}
+
+	// 模拟连接断开场景（非认证失败），直接调用 scheduleReconnect 3 次
+	mgr.lastCloseWasAuthFail = false
+	mgr.scheduleReconnect() // attempt 1
+	mgr.scheduleReconnect() // attempt 2
+	mgr.scheduleReconnect() // attempt 3 → 应耗尽
+
+	errMu.Lock()
+	wasExhausted := gotReconnectExhausted
+	errMu.Unlock()
+	if !wasExhausted {
+		t.Error("expected WsReconnectExhaustedError when reconnect attempts exhausted")
+	}
+
+	if mgr.reconnectAttempts != 2 {
+		t.Errorf("reconnectAttempts = %d, want 2", mgr.reconnectAttempts)
+	}
+}
+
+func TestDisconnectPreventsReconnect(t *testing.T) {
+	// 验证 Disconnect 后不会触发重连
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		if cmd == types.WsCmd.Subscribe {
+			return authSuccessResponse(reqId)
+		}
+		return nil
+	})
+	defer srv.close()
+
+	mgr := NewWsConnectionManager(
+		&DefaultLogger{}, 30000, 1000, 10, srv.url(), types.WsOptions{}, 500, 5,
+	)
+	mgr.SetCredentials("test_bot", "test_secret", nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := mgr.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	var reconnecting bool
+	var reconnMu sync.Mutex
+	mgr.OnReconnecting = func(attempt int) {
+		reconnMu.Lock()
+		reconnecting = true
+		reconnMu.Unlock()
+	}
+
+	mgr.Disconnect()
+
+	// 等待一段时间，确认不会重连
+	time.Sleep(200 * time.Millisecond)
+
+	reconnMu.Lock()
+	wasReconnecting := reconnecting
+	reconnMu.Unlock()
+	if wasReconnecting {
+		t.Error("Disconnect should prevent reconnect, but OnReconnecting was called")
+	}
+
+	if !mgr.isManualClose {
+		t.Error("isManualClose should be true after Disconnect")
+	}
+}
