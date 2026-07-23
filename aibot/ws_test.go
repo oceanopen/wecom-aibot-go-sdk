@@ -24,7 +24,9 @@ type mockWsServer struct {
 	onMessage   func(msg []byte) []byte // 收到消息时的响应逻辑
 	mu          sync.Mutex
 	connected   bool
+	conn        *websocket.Conn // 当前连接（供 writePush 主动推送）
 	lastMessage []byte
+	writeMu     sync.Mutex // 串行化服务端写入（gorilla Conn 写非并发安全）
 }
 
 func newMockWsServer(onMessage func(msg []byte) []byte) *mockWsServer {
@@ -39,11 +41,13 @@ func newMockWsServer(onMessage func(msg []byte) []byte) *mockWsServer {
 		}
 		s.mu.Lock()
 		s.connected = true
+		s.conn = conn
 		s.mu.Unlock()
 		defer func() {
 			conn.Close()
 			s.mu.Lock()
 			s.connected = false
+			s.conn = nil
 			s.mu.Unlock()
 		}()
 
@@ -58,12 +62,30 @@ func newMockWsServer(onMessage func(msg []byte) []byte) *mockWsServer {
 
 			if s.onMessage != nil {
 				if resp := s.onMessage(msg); resp != nil {
-					conn.WriteMessage(websocket.TextMessage, resp)
+					_ = s.writeMessage(resp)
 				}
 			}
 		}
 	}))
 	return s
+}
+
+// writeMessage 串行化地向当前连接写入一帧（gorilla Conn 写非并发安全，统一走 writeMu）。
+func (s *mockWsServer) writeMessage(data []byte) error {
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	if conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// writePush 主动向当前连接推送一帧数据（模拟服务端推送，独立于 onMessage 响应）。
+func (s *mockWsServer) writePush(data []byte) error {
+	return s.writeMessage(data)
 }
 
 func (s *mockWsServer) url() string {
