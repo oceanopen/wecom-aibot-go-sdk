@@ -78,7 +78,7 @@ func (l *DefaultLogger) log(level, message string, args ...any) {
 	}
 	line := fmt.Sprintf("[%s] [%s] [%s] %s", l.formatTime(), l.prefix, level, message)
 	if len(args) > 0 {
-		line += " " + fmt.Sprint(args...)
+		line += fmt.Sprintf(" %s", fmt.Sprint(args...))
 	}
 	fmt.Fprintln(w, line)
 }

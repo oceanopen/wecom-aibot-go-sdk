@@ -18,6 +18,11 @@
 - `aibot/types/`（子包 `types`）：`index.go` / `config.go` / `common.go` / `message.go` / `event.go` / `api.go`
 - `aibot/index.go` 镜像 Node `src/index.ts`，把 `aibot/types` 的公开符号重新导出到 `aibot`，使用户仅 import `aibot`。
 
+## 代码风格
+
+- **字符串拼接一律用 `fmt.Sprintf`**，禁止 `"a" + x + "b"` 风格的 `+` 拼接。
+  例：`fmt.Sprintf("Connecting to %s...", url)` 而非 `"Connecting to " + url + "..."`。
+
 ## 命名约定
 
 - 缩写词仅首字母大写：`Id`（非 `ID`）、`Ws`（非 `WS`）、`Aes`、`App`、`Url`、`Http`、`Md5`。

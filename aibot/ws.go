@@ -127,7 +127,7 @@ func (m *WsConnectionManager) Connect(ctx context.Context) error {
 
 // connectOnce 单次拨号：建立 WebSocket 连接并设置事件处理器。
 func (m *WsConnectionManager) connectOnce() error {
-	m.logger.Info("Connecting to WebSocket: " + m.wsUrl + "...")
+	m.logger.Info(fmt.Sprintf("Connecting to WebSocket: %s...", m.wsUrl))
 
 	// 构建 gorilla dialer
 	dialer := websocket.Dialer{
@@ -145,7 +145,7 @@ func (m *WsConnectionManager) connectOnce() error {
 	// 拨号
 	ws, _, err := dialer.DialContext(context.Background(), m.wsUrl, header)
 	if err != nil {
-		m.logger.Error("Failed to create WebSocket connection: " + err.Error())
+		m.logger.Error(fmt.Sprintf("Failed to create WebSocket connection: %s", err.Error()))
 		return err
 	}
 
@@ -195,7 +195,7 @@ func (m *WsConnectionManager) readLoop() {
 			if !m.closed.Load() {
 				m.closed.Store(true)
 				reason := err.Error()
-				m.logger.Warn("WebSocket connection closed: " + reason)
+				m.logger.Warn(fmt.Sprintf("WebSocket connection closed: %s", reason))
 				if m.OnDisconnected != nil {
 					m.OnDisconnected(reason)
 				}
@@ -224,7 +224,7 @@ func (m *WsConnectionManager) handleFrame(raw json.RawMessage) {
 		ErrMsg  string `json:"errmsg,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &probe); err != nil {
-		m.logger.Error("Failed to parse WebSocket frame: " + err.Error())
+		m.logger.Error(fmt.Sprintf("Failed to parse WebSocket frame: %s", err.Error()))
 		return
 	}
 
@@ -243,24 +243,24 @@ func (m *WsConnectionManager) handleFrame(raw json.RawMessage) {
 			return
 		}
 		// 未知无 cmd 帧
-		m.logger.Warn("Received unknown frame (no cmd): " + string(raw))
+		m.logger.Warn(fmt.Sprintf("Received unknown frame (no cmd): %s", string(raw)))
 		return
 	}
 
 	// 有 cmd 的帧
 	switch probe.Cmd {
 	case types.WsCmd.Callback:
-		m.logger.Debug("[server -> plugin] cmd=" + probe.Cmd + ", reqId=" + reqId)
+		m.logger.Debug(fmt.Sprintf("[server -> plugin] cmd=%s, reqId=%s", probe.Cmd, reqId))
 		if m.OnMessage != nil {
 			m.OnMessage(raw)
 		}
 	case types.WsCmd.EventCallback:
-		m.logger.Debug("[server -> plugin] cmd=" + probe.Cmd + ", reqId=" + reqId)
+		m.logger.Debug(fmt.Sprintf("[server -> plugin] cmd=%s, reqId=%s", probe.Cmd, reqId))
 		if m.OnMessage != nil {
 			m.OnMessage(raw)
 		}
 	default:
-		m.logger.Warn("Received unknown cmd: " + probe.Cmd)
+		m.logger.Warn(fmt.Sprintf("Received unknown cmd: %s", probe.Cmd))
 	}
 }
 
@@ -329,7 +329,7 @@ func (m *WsConnectionManager) sendAuth() {
 	}
 
 	if err := m.sendJSON(frame); err != nil {
-		m.logger.Error("Failed to send auth frame: " + err.Error())
+		m.logger.Error(fmt.Sprintf("Failed to send auth frame: %s", err.Error()))
 	} else {
 		m.logger.Info("Auth frame sent")
 	}
@@ -368,7 +368,7 @@ func (m *WsConnectionManager) disconnect(reason string) {
 		ws.Close()
 	}
 
-	m.logger.Info("WebSocket connection closed: " + reason)
+	m.logger.Info(fmt.Sprintf("WebSocket connection closed: %s", reason))
 	if m.OnDisconnected != nil {
 		m.OnDisconnected(reason)
 	}
