@@ -355,12 +355,18 @@ func TestStreamReplyBodySerialize(t *testing.T) {
 		t.Errorf("msg_item should be omitted when empty (json=%s)", data)
 	}
 
-	// 仅 id（finish/content/feedback 省略）
+	// 仅 id：finish/content 总是序列化（对齐 Node），feedback/msg_item 省略
 	min, _ := json.Marshal(StreamReplyBody{MsgType: "stream", Stream: StreamReply{Id: "only_id"}})
 	var mm map[string]any
 	_ = json.Unmarshal(min, &mm)
 	s2, _ := mm["stream"].(map[string]any)
-	for _, k := range []string{"finish", "content", "feedback", "msg_item"} {
+	if s2["finish"] != false {
+		t.Errorf("stream.finish = %v, want false (always serialized)", s2["finish"])
+	}
+	if s2["content"] != "" {
+		t.Errorf("stream.content = %v, want empty (always serialized)", s2["content"])
+	}
+	for _, k := range []string{"feedback", "msg_item"} {
 		if _, ok := s2[k]; ok {
 			t.Errorf("stream.%s should be omitted when zero (json=%s)", k, min)
 		}

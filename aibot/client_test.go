@@ -704,3 +704,254 @@ func TestWsClientApiGetter(t *testing.T) {
 		t.Error("Api() should return non-nil apiClient")
 	}
 }
+
+// ========== 卡片与欢迎语回复（任务 25）==========
+
+// newCardReplyMockServer 构造一个对各类回复 cmd 都回 ack 的 mock 服务端，并通过 record 记录 (cmd, body)。
+func newCardReplyMockServer(t *testing.T, record func(cmd string, body map[string]any)) *mockWsServer {
+	t.Helper()
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		switch cmd {
+		case types.WsCmd.Subscribe:
+			return authSuccessResponse(reqId)
+		case types.WsCmd.Heartbeat:
+			return heartbeatAckResponse(reqId)
+		case types.WsCmd.Response, types.WsCmd.ResponseWelcome, types.WsCmd.ResponseUpdate:
+			if record != nil {
+				var full struct {
+					Body map[string]any `json:"body"`
+				}
+				_ = json.Unmarshal(msg, &full)
+				record(cmd, full.Body)
+			}
+			return replyAckResponse(reqId)
+		}
+		return nil
+	})
+	return srv
+}
+
+// connectForTest 连接 client 至认证成功，返回断开+取消函数。
+func connectForTest(t *testing.T, client *WsClient) func() {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := client.Connect(ctx); err != nil {
+		cancel()
+		t.Fatalf("Connect failed: %v", err)
+	}
+	return func() {
+		client.Disconnect()
+		cancel()
+	}
+}
+
+func TestReplyWelcome(t *testing.T) {
+	var mu sync.Mutex
+	var gotCmd string
+	var gotBody map[string]any
+	srv := newCardReplyMockServer(t, func(cmd string, body map[string]any) {
+		mu.Lock()
+		gotCmd, gotBody = cmd, body
+		mu.Unlock()
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	welcome := types.WelcomeTextReplyBody{MsgType: "text"}
+	welcome.Text.Content = "欢迎"
+	headers := types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.ResponseWelcome)}
+	if _, err := client.ReplyWelcome(headers, welcome); err != nil {
+		t.Fatalf("ReplyWelcome error: %v", err)
+	}
+	disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotCmd != types.WsCmd.ResponseWelcome {
+		t.Errorf("cmd = %q, want %q", gotCmd, types.WsCmd.ResponseWelcome)
+	}
+	if gotBody["msgtype"] != "text" {
+		t.Errorf("msgtype = %v, want text", gotBody["msgtype"])
+	}
+	txt, _ := gotBody["text"].(map[string]any)
+	if txt == nil || txt["content"] != "欢迎" {
+		t.Errorf("text.content = %v, want 欢迎", txt)
+	}
+}
+
+func TestReplyTemplateCard(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := newCardReplyMockServer(t, func(cmd string, body map[string]any) {
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	card := types.TemplateCard{CardType: types.TemplateCardType.TextNotice, TaskId: "t1"}
+	// 带 feedback：合并到卡片
+	if _, err := client.ReplyTemplateCard(types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}, card, &types.ReplyFeedback{Id: "fb1"}); err != nil {
+		t.Fatalf("ReplyTemplateCard error: %v", err)
+	}
+	// 不带 feedback（且验证上一条未污染调用方 card）
+	if _, err := client.ReplyTemplateCard(types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}, card, nil); err != nil {
+		t.Fatalf("ReplyTemplateCard(nil) error: %v", err)
+	}
+	disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("received %d bodies, want 2", len(bodies))
+	}
+	if bodies[0]["msgtype"] != "template_card" {
+		t.Errorf("body[0].msgtype = %v, want template_card", bodies[0]["msgtype"])
+	}
+	c1, _ := bodies[0]["template_card"].(map[string]any)
+	if c1 == nil || c1["card_type"] != "text_notice" || c1["task_id"] != "t1" {
+		t.Errorf("body[0].template_card = %v", c1)
+	}
+	fb, _ := c1["feedback"].(map[string]any)
+	if fb == nil || fb["id"] != "fb1" {
+		t.Errorf("feedback not merged into card: %v", fb)
+	}
+	// 第二条：feedback 应缺失（调用方 card 未被污染 + 传 nil）
+	c2, _ := bodies[1]["template_card"].(map[string]any)
+	if c2 == nil {
+		t.Fatalf("body[1].template_card missing")
+	}
+	if _, ok := c2["feedback"]; ok {
+		t.Errorf("feedback should be absent when nil, got %v", c2["feedback"])
+	}
+}
+
+func TestReplyStreamWithCard(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := newCardReplyMockServer(t, func(cmd string, body map[string]any) {
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	card := types.TemplateCard{CardType: types.TemplateCardType.TextNotice}
+	// 全选项：streamFeedback + templateCard + cardFeedback + finish
+	opts := ReplyStreamWithCardOptions{
+		StreamFeedback: &types.ReplyFeedback{Id: "sfb"},
+		TemplateCard:   &card,
+		CardFeedback:   &types.ReplyFeedback{Id: "cfb"},
+	}
+	if _, err := client.ReplyStreamWithCard(types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}, "sid", "hello", true, opts); err != nil {
+		t.Fatalf("ReplyStreamWithCard error: %v", err)
+	}
+	// 无 templateCard
+	if _, err := client.ReplyStreamWithCard(types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}, "sid", "world", false, ReplyStreamWithCardOptions{}); err != nil {
+		t.Fatalf("ReplyStreamWithCard(no card) error: %v", err)
+	}
+	disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("received %d bodies, want 2", len(bodies))
+	}
+	// 第一条
+	if bodies[0]["msgtype"] != "stream_with_template_card" {
+		t.Errorf("body[0].msgtype = %v", bodies[0]["msgtype"])
+	}
+	s1, _ := bodies[0]["stream"].(map[string]any)
+	if s1 == nil || s1["content"] != "hello" || s1["finish"] != true {
+		t.Errorf("body[0].stream = %v", s1)
+	}
+	sfb, _ := s1["feedback"].(map[string]any)
+	if sfb == nil || sfb["id"] != "sfb" {
+		t.Errorf("stream.feedback not set: %v", sfb)
+	}
+	tc, _ := bodies[0]["template_card"].(map[string]any)
+	if tc == nil || tc["card_type"] != "text_notice" {
+		t.Errorf("body[0].template_card = %v", tc)
+	}
+	cfb, _ := tc["feedback"].(map[string]any)
+	if cfb == nil || cfb["id"] != "cfb" {
+		t.Errorf("template_card.feedback not merged: %v", cfb)
+	}
+	// 第二条：无 template_card，无 stream.feedback
+	if _, ok := bodies[1]["template_card"]; ok {
+		t.Errorf("body[1] should not have template_card")
+	}
+	s2, _ := bodies[1]["stream"].(map[string]any)
+	if s2 == nil || s2["content"] != "world" || s2["finish"] != false {
+		t.Errorf("body[1].stream = %v", s2)
+	}
+	if _, ok := s2["feedback"]; ok {
+		t.Errorf("body[1].stream.feedback should be absent")
+	}
+}
+
+func TestUpdateTemplateCard(t *testing.T) {
+	var mu sync.Mutex
+	var recorded []struct {
+		cmd  string
+		body map[string]any
+	}
+	srv := newCardReplyMockServer(t, func(cmd string, body map[string]any) {
+		mu.Lock()
+		recorded = append(recorded, struct {
+			cmd  string
+			body map[string]any
+		}{cmd, body})
+		mu.Unlock()
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	card := types.TemplateCard{CardType: types.TemplateCardType.TextNotice, TaskId: "task1"}
+	// 带 userIds
+	if _, err := client.UpdateTemplateCard(types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.ResponseUpdate)}, card, []string{"u1", "u2"}); err != nil {
+		t.Fatalf("UpdateTemplateCard error: %v", err)
+	}
+	// 不带 userIds
+	if _, err := client.UpdateTemplateCard(types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.ResponseUpdate)}, card, nil); err != nil {
+		t.Fatalf("UpdateTemplateCard(nil) error: %v", err)
+	}
+	disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recorded) != 2 {
+		t.Fatalf("received %d, want 2", len(recorded))
+	}
+	// 第一条
+	if recorded[0].cmd != types.WsCmd.ResponseUpdate {
+		t.Errorf("cmd = %q, want %q", recorded[0].cmd, types.WsCmd.ResponseUpdate)
+	}
+	if recorded[0].body["response_type"] != "update_template_card" {
+		t.Errorf("response_type = %v", recorded[0].body["response_type"])
+	}
+	tc, _ := recorded[0].body["template_card"].(map[string]any)
+	if tc == nil || tc["task_id"] != "task1" {
+		t.Errorf("template_card = %v", tc)
+	}
+	uids, _ := recorded[0].body["userids"].([]any)
+	if len(uids) != 2 || uids[0] != "u1" || uids[1] != "u2" {
+		t.Errorf("userids = %v, want [u1 u2]", uids)
+	}
+	// 第二条：无 userids
+	if _, ok := recorded[1].body["userids"]; ok {
+		t.Errorf("body[1].userids should be absent when nil")
+	}
+}

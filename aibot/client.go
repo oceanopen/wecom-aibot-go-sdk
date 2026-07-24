@@ -289,6 +289,90 @@ func (c *WsClient) HasPendingReplyAck(frame types.WsFrameHeaders) bool {
 	return c.wsManager.HasPendingAck(frame.ReqId)
 }
 
+// ReplyStreamWithCardOptions ReplyStreamWithCard 的可选项，对应 Node replyStreamWithCard 的 options 参数
+// （Node 为内联匿名对象，Go 用命名结构体承载 4 个可选字段）。
+type ReplyStreamWithCardOptions struct {
+	MsgItem        []types.ReplyMsgItem // 图文混排项（仅 finish=true 时有效）
+	StreamFeedback *types.ReplyFeedback // 流式消息反馈信息（首次回复时设置）
+	TemplateCard   *types.TemplateCard  // 模板卡片内容（同一消息只能回复一次）
+	CardFeedback   *types.ReplyFeedback // 模板卡片反馈信息
+}
+
+// ReplyWelcome 发送欢迎语回复，对应 Node replyWelcome。
+//
+// 需使用对应事件（如 enter_chat）的 req_id，frame 应来自触发欢迎语的事件帧；
+// 收到事件回调后须在 5 秒内发送。body 为 WelcomeTextReplyBody 或 WelcomeTemplateCardReplyBody。
+func (c *WsClient) ReplyWelcome(frame types.WsFrameHeaders, body any) (*types.WsFrame[json.RawMessage], error) {
+	return c.Reply(frame, body, types.WsCmd.ResponseWelcome)
+}
+
+// ReplyTemplateCard 回复模板卡片消息，对应 Node replyTemplateCard。
+//
+// 收到消息回调或进入会话事件后可回复模板卡片；feedback 非空时合并到卡片（不修改调用方原始 card）。
+func (c *WsClient) ReplyTemplateCard(frame types.WsFrameHeaders, card types.TemplateCard, feedback *types.ReplyFeedback) (*types.WsFrame[json.RawMessage], error) {
+	// feedback 非空时合并到 card（card 为值拷贝，不影响调用方原始结构）
+	if feedback != nil {
+		card.Feedback = feedback
+	}
+	body := types.TemplateCardReplyBody{
+		MsgType:      "template_card",
+		TemplateCard: card,
+	}
+	return c.Reply(frame, body, types.WsCmd.Response)
+}
+
+// ReplyStreamWithCard 发送流式消息 + 模板卡片组合回复，对应 Node replyStreamWithCard。
+//
+// 首次回复必须返回 stream.id；template_card 可首次或后续回复，但同一消息只能回复一次。
+// msg_item 仅 finish=true 时附带；streamFeedback 首次回复时设置；templateCard 非空时附带（cardFeedback 合并）。
+func (c *WsClient) ReplyStreamWithCard(frame types.WsFrameHeaders, streamId, content string, finish bool, opts ReplyStreamWithCardOptions) (*types.WsFrame[json.RawMessage], error) {
+	stream := types.StreamReply{
+		Id:      streamId,
+		Finish:  finish,
+		Content: content,
+	}
+	// msg_item 仅在 finish=true 时支持
+	if finish && len(opts.MsgItem) > 0 {
+		stream.MsgItem = opts.MsgItem
+	}
+	// 流式消息反馈仅在首次回复时设置
+	if opts.StreamFeedback != nil {
+		stream.Feedback = opts.StreamFeedback
+	}
+
+	body := types.StreamWithTemplateCardReplyBody{
+		MsgType: "stream_with_template_card",
+		Stream:  stream,
+	}
+
+	// template_card 非空时附带（拷贝后合并 cardFeedback，不修改调用方原始 card）
+	if opts.TemplateCard != nil {
+		card := *opts.TemplateCard
+		if opts.CardFeedback != nil {
+			card.Feedback = opts.CardFeedback
+		}
+		body.TemplateCard = &card
+	}
+
+	return c.Reply(frame, body, types.WsCmd.Response)
+}
+
+// UpdateTemplateCard 更新模板卡片，对应 Node updateTemplateCard。
+//
+// 需使用对应事件（template_card_event）的 req_id，frame 应来自触发更新的事件帧；
+// 收到事件回调后须在 5 秒内发送。card.TaskId 须与回调收到的 task_id 一致。
+// userIds 非空时仅替换指定用户，否则替换所有用户。
+func (c *WsClient) UpdateTemplateCard(frame types.WsFrameHeaders, card types.TemplateCard, userIds []string) (*types.WsFrame[json.RawMessage], error) {
+	body := types.UpdateTemplateCardBody{
+		ResponseType: "update_template_card",
+		TemplateCard: card,
+	}
+	if len(userIds) > 0 {
+		body.UserIds = userIds
+	}
+	return c.Reply(frame, body, types.WsCmd.ResponseUpdate)
+}
+
 // ========== 文件下载 ==========
 
 // DownloadFile 下载文件并使用 AES 密钥解密，对应 Node downloadFile。

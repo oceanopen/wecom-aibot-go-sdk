@@ -253,10 +253,13 @@ type TemplateCard struct {
 // ========== 流式回复消息体 ==========
 
 // StreamReply 流式回复内容对象，对应 Node StreamReplyBody 的 stream 字段（被 StreamWithTemplateCardReplyBody 复用）。
+//
+// Node 的 replyStream/replyStreamWithCard 用对象字面量 { id, finish, content } 总是序列化这三项
+// （即便 finish=false / content=""），故 Finish/Content 不加 omitempty；仅 msg_item/feedback 条件序列化。
 type StreamReply struct {
 	Id       string         `json:"id"`                 // 流式消息 ID（首次回复设置，后续刷新用相同 ID）
-	Finish   bool           `json:"finish,omitempty"`   // 是否结束流式消息
-	Content  string         `json:"content,omitempty"`  // 回复内容（支持 Markdown，≤20480 字节，utf8）
+	Finish   bool           `json:"finish"`             // 是否结束流式消息（总是序列化，对齐 Node）
+	Content  string         `json:"content"`            // 回复内容（支持 Markdown，≤20480 字节，utf8）
 	MsgItem  []ReplyMsgItem `json:"msg_item,omitempty"` // 图文混排列表（仅 finish=true 支持，≤10）
 	Feedback *ReplyFeedback `json:"feedback,omitempty"` // 反馈信息（首次回复时设置）
 }
