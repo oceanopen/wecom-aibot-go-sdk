@@ -78,6 +78,24 @@ var (
 	_ UpdateTemplateCardBody
 )
 
+// ========== api.go：媒体类型 + 主动发送体（任务 26）==========
+
+var (
+	_ = WeComMediaFile // WeComMediaType 常量
+	_ = WeComMediaImage
+	_ = WeComMediaVoice
+	_ = WeComMediaVideo
+)
+
+var (
+	_ WeComMediaType   // 媒体类型
+	_ SendMediaContent // 媒体消息子结构
+	_ SendVideoContent
+	_ SendMediaMsgBody // 主动发送体
+	_ SendMarkdownMsgBody
+	_ SendTemplateCardMsgBody
+)
+
 // ========== message.go ==========
 
 var (

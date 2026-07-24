@@ -373,6 +373,88 @@ func (c *WsClient) UpdateTemplateCard(frame types.WsFrameHeaders, card types.Tem
 	return c.Reply(frame, body, types.WsCmd.ResponseUpdate)
 }
 
+// ========== 主动发送与媒体回复 ==========
+
+// VideoOptions 视频消息可选参数（仅 mediaType=video 生效），对应 Node replyMedia/sendMediaMessage 的 videoOptions。
+type VideoOptions struct {
+	Title       string // 视频标题（≤128 字节，超出截断）
+	Description string // 视频描述（≤512 字节，超出截断）
+}
+
+// SendMessage 向指定会话主动发送消息，对应 Node sendMessage。
+//
+// 无需依赖收到的回调帧；生成新 reqId，将 chatid 合并进 body 后通过 aibot_send_msg 通道发送。
+// body 为 SendMarkdownMsgBody / SendTemplateCardMsgBody / SendMediaMsgBody。
+func (c *WsClient) SendMessage(chatid string, body any) (*types.WsFrame[json.RawMessage], error) {
+	reqId := GenerateReqId(types.WsCmd.SendMsg)
+	fullBody, err := mergeChatId(chatid, body)
+	if err != nil {
+		return nil, fmt.Errorf("sendMessage: marshal body failed: %s", err.Error())
+	}
+	return c.wsManager.SendReply(types.WsFrameHeaders{ReqId: reqId}, fullBody, types.WsCmd.SendMsg)
+}
+
+// SendMediaMessage 主动发送媒体消息，对应 Node sendMediaMessage。
+//
+// 通过 aibot_send_msg 主动推送通道发送媒体消息（file/image/voice/video）。
+// videoOpts 仅 mediaType=video 时生效（设置 title/description）。
+func (c *WsClient) SendMediaMessage(chatid string, mediaType types.WeComMediaType, mediaId string, videoOpts *VideoOptions) (*types.WsFrame[json.RawMessage], error) {
+	body := buildMediaBody(mediaType, mediaId, videoOpts)
+	return c.SendMessage(chatid, body)
+}
+
+// ReplyMedia 被动回复媒体消息，对应 Node replyMedia。
+//
+// 通过 aibot_respond_msg 被动回复通道发送媒体消息（file/image/voice/video）。
+// frame 为收到的原始帧（透传 req_id）；videoOpts 仅 mediaType=video 时生效。
+func (c *WsClient) ReplyMedia(frame types.WsFrameHeaders, mediaType types.WeComMediaType, mediaId string, videoOpts *VideoOptions) (*types.WsFrame[json.RawMessage], error) {
+	body := buildMediaBody(mediaType, mediaId, videoOpts)
+	return c.Reply(frame, body, types.WsCmd.Response)
+}
+
+// buildMediaBody 构造媒体消息体（仅设置与 mediaType 匹配的字段），对应 Node replyMedia/sendMediaMessage 的 body 组装。
+//
+// Node 用动态键 `[mediaType]: mediaContent`，Go 用 switch 设置对应指针字段，产出等价 JSON。
+func buildMediaBody(mediaType types.WeComMediaType, mediaId string, videoOpts *VideoOptions) types.SendMediaMsgBody {
+	body := types.SendMediaMsgBody{MsgType: mediaType}
+	switch mediaType {
+	case types.WeComMediaFile:
+		body.File = &types.SendMediaContent{MediaId: mediaId}
+	case types.WeComMediaImage:
+		body.Image = &types.SendMediaContent{MediaId: mediaId}
+	case types.WeComMediaVoice:
+		body.Voice = &types.SendMediaContent{MediaId: mediaId}
+	case types.WeComMediaVideo:
+		video := &types.SendVideoContent{MediaId: mediaId}
+		if videoOpts != nil {
+			video.Title = videoOpts.Title
+			video.Description = videoOpts.Description
+		}
+		body.Video = video
+	}
+	return body
+}
+
+// mergeChatId 将 chatid 合并进 body（对应 Node `{ chatid, ...body }`）。
+//
+// body 序列化为 map 后注入 chatid 字段，避免修改原 body 类型。
+func mergeChatId(chatid string, body any) (map[string]any, error) {
+	full := map[string]any{}
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		if string(data) != "null" {
+			if err := json.Unmarshal(data, &full); err != nil {
+				return nil, err
+			}
+		}
+	}
+	full["chatid"] = chatid
+	return full, nil
+}
+
 // ========== 文件下载 ==========
 
 // DownloadFile 下载文件并使用 AES 密钥解密，对应 Node downloadFile。

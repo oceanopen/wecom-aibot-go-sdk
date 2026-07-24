@@ -718,7 +718,7 @@ func newCardReplyMockServer(t *testing.T, record func(cmd string, body map[strin
 			return authSuccessResponse(reqId)
 		case types.WsCmd.Heartbeat:
 			return heartbeatAckResponse(reqId)
-		case types.WsCmd.Response, types.WsCmd.ResponseWelcome, types.WsCmd.ResponseUpdate:
+		case types.WsCmd.Response, types.WsCmd.ResponseWelcome, types.WsCmd.ResponseUpdate, types.WsCmd.SendMsg:
 			if record != nil {
 				var full struct {
 					Body map[string]any `json:"body"`
@@ -953,5 +953,142 @@ func TestUpdateTemplateCard(t *testing.T) {
 	// 第二条：无 userids
 	if _, ok := recorded[1].body["userids"]; ok {
 		t.Errorf("body[1].userids should be absent when nil")
+	}
+}
+
+// ========== 主动发送与媒体回复（任务 26）==========
+
+func TestSendMessageMarkdown(t *testing.T) {
+	var mu sync.Mutex
+	var gotCmd string
+	var gotBody map[string]any
+	srv := newCardReplyMockServer(t, func(cmd string, body map[string]any) {
+		mu.Lock()
+		gotCmd, gotBody = cmd, body
+		mu.Unlock()
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	md := types.SendMarkdownMsgBody{MsgType: "markdown"}
+	md.Markdown.Content = "**主动推送**"
+	if _, err := client.SendMessage("chat_001", md); err != nil {
+		t.Fatalf("SendMessage error: %v", err)
+	}
+	disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotCmd != types.WsCmd.SendMsg {
+		t.Errorf("cmd = %q, want %q", gotCmd, types.WsCmd.SendMsg)
+	}
+	if gotBody["chatid"] != "chat_001" {
+		t.Errorf("chatid = %v, want chat_001（应合并进 body）", gotBody["chatid"])
+	}
+	if gotBody["msgtype"] != "markdown" {
+		t.Errorf("msgtype = %v, want markdown", gotBody["msgtype"])
+	}
+	mc, _ := gotBody["markdown"].(map[string]any)
+	if mc == nil || mc["content"] != "**主动推送**" {
+		t.Errorf("markdown.content = %v", mc)
+	}
+}
+
+func TestSendMediaMessage(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := newCardReplyMockServer(t, func(cmd string, body map[string]any) {
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	// image
+	if _, err := client.SendMediaMessage("chat_002", types.WeComMediaImage, "img_mid", nil); err != nil {
+		t.Fatalf("SendMediaMessage(image) error: %v", err)
+	}
+	// video with title/description
+	if _, err := client.SendMediaMessage("chat_003", types.WeComMediaVideo, "vid_mid", &VideoOptions{Title: "标题", Description: "描述"}); err != nil {
+		t.Fatalf("SendMediaMessage(video) error: %v", err)
+	}
+	disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("received %d bodies, want 2", len(bodies))
+	}
+	// image：仅 image 字段，无 file/voice/video
+	if bodies[0]["msgtype"] != "image" || bodies[0]["chatid"] != "chat_002" {
+		t.Errorf("body[0] = %v", bodies[0])
+	}
+	img, _ := bodies[0]["image"].(map[string]any)
+	if img == nil || img["media_id"] != "img_mid" {
+		t.Errorf("body[0].image = %v", img)
+	}
+	for _, k := range []string{"file", "voice", "video"} {
+		if _, ok := bodies[0][k]; ok {
+			t.Errorf("body[0].%s should be absent for image", k)
+		}
+	}
+	// video：title/description
+	if bodies[1]["msgtype"] != "video" || bodies[1]["chatid"] != "chat_003" {
+		t.Errorf("body[1] = %v", bodies[1])
+	}
+	vid, _ := bodies[1]["video"].(map[string]any)
+	if vid == nil || vid["media_id"] != "vid_mid" {
+		t.Errorf("body[1].video = %v", vid)
+	}
+	if vid["title"] != "标题" || vid["description"] != "描述" {
+		t.Errorf("video title/description = %v", vid)
+	}
+}
+
+func TestReplyMedia(t *testing.T) {
+	var mu sync.Mutex
+	var gotCmd string
+	var gotBody map[string]any
+	srv := newCardReplyMockServer(t, func(cmd string, body map[string]any) {
+		mu.Lock()
+		gotCmd, gotBody = cmd, body
+		mu.Unlock()
+	})
+	defer srv.close()
+
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	headers := types.WsFrameHeaders{ReqId: GenerateReqId(types.WsCmd.Response)}
+	if _, err := client.ReplyMedia(headers, types.WeComMediaFile, "file_mid", nil); err != nil {
+		t.Fatalf("ReplyMedia error: %v", err)
+	}
+	disconnect()
+
+	mu.Lock()
+	defer mu.Unlock()
+	// 被动回复：cmd=Response，无 chatid
+	if gotCmd != types.WsCmd.Response {
+		t.Errorf("cmd = %q, want %q", gotCmd, types.WsCmd.Response)
+	}
+	if _, ok := gotBody["chatid"]; ok {
+		t.Errorf("ReplyMedia body should not have chatid（被动回复不合并 chatid）")
+	}
+	if gotBody["msgtype"] != "file" {
+		t.Errorf("msgtype = %v, want file", gotBody["msgtype"])
+	}
+	f, _ := gotBody["file"].(map[string]any)
+	if f == nil || f["media_id"] != "file_mid" {
+		t.Errorf("file.media_id = %v", f)
+	}
+	for _, k := range []string{"image", "voice", "video"} {
+		if _, ok := gotBody[k]; ok {
+			t.Errorf("body.%s should be absent for file", k)
+		}
 	}
 }

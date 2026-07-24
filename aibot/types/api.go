@@ -311,3 +311,55 @@ type UpdateTemplateCardBody struct {
 	UserIds      []string     `json:"userids,omitempty"` // 要替换的 userid 列表（不填则替换所有用户）
 	TemplateCard TemplateCard `json:"template_card"`     // 要替换的模版卡片内容
 }
+
+// ========== 媒体消息类型 ==========
+
+// WeComMediaType 企业微信媒体类型，对应 Node WeComMediaType（'file' | 'image' | 'voice' | 'video'）。
+type WeComMediaType string
+
+// 媒体类型取值常量。
+const (
+	WeComMediaFile  WeComMediaType = "file"  // 文件
+	WeComMediaImage WeComMediaType = "image" // 图片
+	WeComMediaVoice WeComMediaType = "voice" // 语音
+	WeComMediaVideo WeComMediaType = "video" // 视频
+)
+
+// ========== 主动发送消息体 ==========
+
+// SendMediaContent 媒体消息内容（file/image/voice 共用，仅 media_id），对应 Node SendMediaMsgBody 的内联 { media_id }。
+type SendMediaContent struct {
+	MediaId string `json:"media_id"` // 临时素材 media_id
+}
+
+// SendVideoContent 视频消息内容，对应 Node SendMediaMsgBody.video 内联结构。
+type SendVideoContent struct {
+	MediaId     string `json:"media_id"`              // 临时素材 media_id
+	Title       string `json:"title,omitempty"`       // 视频标题（≤128 字节，超出截断）
+	Description string `json:"description,omitempty"` // 视频描述（≤512 字节，超出截断）
+}
+
+// SendMediaMsgBody 媒体消息发送体（主动发送 + 被动回复共用），对应 Node SendMediaMsgBody。
+//
+// file/image/voice/video 四选一：仅设置与 msgtype 匹配的字段（指针 + omitempty 保证其余省略）。
+type SendMediaMsgBody struct {
+	MsgType WeComMediaType    `json:"msgtype"`         // 消息类型（file/image/voice/video）
+	File    *SendMediaContent `json:"file,omitempty"`  // 文件消息
+	Image   *SendMediaContent `json:"image,omitempty"` // 图片消息
+	Voice   *SendMediaContent `json:"voice,omitempty"` // 语音消息
+	Video   *SendVideoContent `json:"video,omitempty"` // 视频消息
+}
+
+// SendMarkdownMsgBody 主动发送 Markdown 消息体，对应 Node SendMarkdownMsgBody。
+type SendMarkdownMsgBody struct {
+	MsgType  string `json:"msgtype"` // 消息类型，固定值 markdown
+	Markdown struct {
+		Content string `json:"content"` // markdown 文本内容
+	} `json:"markdown"` // markdown 消息内容
+}
+
+// SendTemplateCardMsgBody 主动发送模板卡片消息体，对应 Node SendTemplateCardMsgBody。
+type SendTemplateCardMsgBody struct {
+	MsgType      string       `json:"msgtype"`       // 消息类型，固定值 template_card
+	TemplateCard TemplateCard `json:"template_card"` // 模板卡片内容
+}
