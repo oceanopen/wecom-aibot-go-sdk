@@ -40,6 +40,44 @@ var (
 	_ WsFrame[any]   // 确认 WsFrame[T] 存在
 )
 
+// ========== api.go：模板卡片 + 回复体（任务 24）==========
+
+var (
+	_ = TemplateCardType.TextNotice // TemplateCardType 常量
+	_ = TemplateCardType.NewsNotice
+	_ = TemplateCardType.ButtonInteraction
+	_ = TemplateCardType.VoteInteraction
+	_ = TemplateCardType.MultipleInteraction
+)
+
+var (
+	_ ReplyMsgItem // 回复通用子结构
+	_ ReplyFeedback
+	_ TemplateCard // 模板卡片及子结构
+	_ TemplateCardSource
+	_ TemplateCardActionMenu
+	_ TemplateCardMainTitle
+	_ TemplateCardEmphasisContent
+	_ TemplateCardQuoteArea
+	_ TemplateCardHorizontalContent
+	_ TemplateCardJumpAction
+	_ TemplateCardAction
+	_ TemplateCardVerticalContent
+	_ TemplateCardImage
+	_ TemplateCardImageTextArea
+	_ TemplateCardSubmitButton
+	_ TemplateCardSelectionItem
+	_ TemplateCardButton
+	_ TemplateCardCheckbox
+	_ StreamReply // 回复消息体
+	_ StreamReplyBody
+	_ WelcomeTextReplyBody
+	_ WelcomeTemplateCardReplyBody
+	_ TemplateCardReplyBody
+	_ StreamWithTemplateCardReplyBody
+	_ UpdateTemplateCardBody
+)
+
 // ========== message.go ==========
 
 var (
