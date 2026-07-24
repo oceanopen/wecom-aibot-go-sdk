@@ -393,7 +393,7 @@ func (c *WsClient) SendMessage(chatid string, body any) (*types.WsFrame[json.Raw
 	reqId := GenerateReqId(types.WsCmd.SendMsg)
 	fullBody, err := mergeChatId(chatid, body)
 	if err != nil {
-		return nil, fmt.Errorf("sendMessage: marshal body failed: %s", err.Error())
+		return nil, fmt.Errorf("sendMessage: marshal body failed: %w", err)
 	}
 	return c.wsManager.SendReply(types.WsFrameHeaders{ReqId: reqId}, fullBody, types.WsCmd.SendMsg)
 }
@@ -506,7 +506,7 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 	}
 	var initBody types.UploadMediaInitResult
 	if err := json.Unmarshal(initResult.Body, &initBody); err != nil {
-		return nil, fmt.Errorf("upload init failed: parse response: %s", err.Error())
+		return nil, fmt.Errorf("upload init failed: parse response: %w", err)
 	}
 	if initBody.UploadId == "" {
 		return nil, fmt.Errorf("upload init failed: no upload_id returned. Response: %s", string(initResult.Body))
@@ -540,7 +540,7 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 				time.Sleep(delay)
 			}
 		}
-		return fmt.Errorf("chunk %d upload failed after %d attempts: %s", chunkIndex, uploadMaxChunkRetries+1, lastErr.Error())
+		return fmt.Errorf("chunk %d upload failed after %d attempts: %w", chunkIndex, uploadMaxChunkRetries+1, lastErr)
 	}
 
 	// Step 2: 分片上传
@@ -593,7 +593,7 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 		}
 		wg.Wait()
 		if failCount > 0 {
-			return nil, fmt.Errorf("upload failed: %d chunk(s) failed. First error: %s", failCount, firstErr.Error())
+			return nil, fmt.Errorf("upload failed: %d chunk(s) failed. First error: %w", failCount, firstErr)
 		}
 	}
 
@@ -613,7 +613,7 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 		CreatedAt string               `json:"created_at"`
 	}
 	if err := json.Unmarshal(finishResult.Body, &finishBody); err != nil {
-		return nil, fmt.Errorf("upload finish failed: parse response: %s", err.Error())
+		return nil, fmt.Errorf("upload finish failed: parse response: %w", err)
 	}
 	if finishBody.MediaId == "" {
 		return nil, fmt.Errorf("upload finish failed: no media_id returned. Response: %s", string(finishResult.Body))

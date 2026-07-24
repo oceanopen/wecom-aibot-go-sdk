@@ -37,7 +37,7 @@ func DecodeEncodingAesKey(encodingAesKey string) ([]byte, error) {
 	}
 	key, err := base64.StdEncoding.DecodeString(withPadding)
 	if err != nil {
-		return nil, fmt.Errorf("invalid encodingAESKey (base64 decode failed): %s", err.Error())
+		return nil, fmt.Errorf("invalid encodingAESKey (base64 decode failed): %w", err)
 	}
 	if len(key) != aesKeyLength {
 		return nil, fmt.Errorf("invalid encodingAESKey (expected %d bytes, got %d)", aesKeyLength, len(key))
@@ -105,12 +105,12 @@ func (c *WecomCrypto) VerifySignature(signature, timestamp, nonce, encrypt strin
 func (c *WecomCrypto) Decrypt(encryptText string) (string, error) {
 	cipherText, err := base64.StdEncoding.DecodeString(encryptText)
 	if err != nil {
-		return "", fmt.Errorf("invalid encrypt (base64 decode failed): %s", err.Error())
+		return "", fmt.Errorf("invalid encrypt (base64 decode failed): %w", err)
 	}
 
 	block, err := aes.NewCipher(c.aesKey)
 	if err != nil {
-		return "", fmt.Errorf("invalid aesKey: %s", err.Error())
+		return "", fmt.Errorf("invalid aesKey: %w", err)
 	}
 
 	// 密文须为 AES 块大小（16）的整数倍，否则 CBC 解密会 panic（Node 会抛错）
@@ -156,7 +156,7 @@ func (c *WecomCrypto) Decrypt(encryptText string) (string, error) {
 func (c *WecomCrypto) Encrypt(plainText, timestamp, nonce string) (encrypt string, signature string, err error) {
 	random16 := make([]byte, 16)
 	if _, err = rand.Read(random16); err != nil {
-		return "", "", fmt.Errorf("generate random bytes failed: %s", err.Error())
+		return "", "", fmt.Errorf("generate random bytes failed: %w", err)
 	}
 
 	msgBuf := []byte(plainText)
@@ -174,7 +174,7 @@ func (c *WecomCrypto) Encrypt(plainText, timestamp, nonce string) (encrypt strin
 
 	block, err := aes.NewCipher(c.aesKey)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid aesKey: %s", err.Error())
+		return "", "", fmt.Errorf("invalid aesKey: %w", err)
 	}
 	encrypted := make([]byte, len(padded))
 	cipher.NewCBCEncrypter(block, c.iv).CryptBlocks(encrypted, padded)

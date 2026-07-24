@@ -29,12 +29,12 @@ func DecryptFile(encrypted []byte, aesKey string) ([]byte, error) {
 	// 将 Base64 编码的 aesKey 解码
 	key, err := base64.StdEncoding.DecodeString(aesKey)
 	if err != nil {
-		return nil, fmt.Errorf("decryptFile: invalid base64 aesKey - %s", err.Error())
+		return nil, fmt.Errorf("decryptFile: invalid base64 aesKey - %w", err)
 	}
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, fmt.Errorf("decryptFile: invalid aesKey - %s", err.Error())
+		return nil, fmt.Errorf("decryptFile: invalid aesKey - %w", err)
 	}
 
 	// 加密数据长度须为 AES 块大小（16）的整数倍
@@ -50,7 +50,7 @@ func DecryptFile(encrypted []byte, aesKey string) ([]byte, error) {
 	// 手动去除 PKCS#7 填充（支持 32 字节 block）
 	unpadded, err := Pkcs7Unpad(dst, Pkcs7BlockSize)
 	if err != nil {
-		return nil, fmt.Errorf("decryptFile: Decryption failed - %s. This may indicate corrupted data or an incorrect aesKey", err.Error())
+		return nil, fmt.Errorf("decryptFile: Decryption failed - %w. This may indicate corrupted data or an incorrect aesKey", err)
 	}
 	return unpadded, nil
 }

@@ -140,7 +140,7 @@ func (m *WsConnectionManager) Connect(ctx context.Context) error {
 	}
 
 	// 拨号
-	if err := m.connectOnce(); err != nil {
+	if err := m.connectOnce(ctx); err != nil {
 		return err
 	}
 
@@ -158,7 +158,7 @@ func (m *WsConnectionManager) Connect(ctx context.Context) error {
 }
 
 // connectOnce 单次拨号：建立 WebSocket 连接并设置事件处理器。
-func (m *WsConnectionManager) connectOnce() error {
+func (m *WsConnectionManager) connectOnce(ctx context.Context) error {
 	m.logger.Info(fmt.Sprintf("Connecting to WebSocket: %s...", m.wsUrl))
 
 	// 构建 gorilla dialer
@@ -173,7 +173,7 @@ func (m *WsConnectionManager) connectOnce() error {
 	maps.Copy(header, m.wsOptions.Header)
 
 	// 拨号
-	ws, _, err := dialer.DialContext(context.Background(), m.wsUrl, header)
+	ws, _, err := dialer.DialContext(ctx, m.wsUrl, header)
 	if err != nil {
 		m.logger.Error(fmt.Sprintf("Failed to create WebSocket connection: %s", err.Error()))
 		return err
@@ -646,7 +646,7 @@ func (m *WsConnectionManager) scheduleReconnect() {
 // reconnect 执行一次重连：重新拨号并发送认证帧。
 func (m *WsConnectionManager) reconnect() {
 	m.closed.Store(false)
-	if err := m.connectOnce(); err != nil {
+	if err := m.connectOnce(context.Background()); err != nil {
 		m.logger.Error(fmt.Sprintf("Reconnect failed: %s", err.Error()))
 		m.scheduleReconnect()
 	}
@@ -792,7 +792,7 @@ func (m *WsConnectionManager) handleReplyAck(reqId string, raw json.RawMessage) 
 	var ack types.WsFrame[json.RawMessage]
 	result := ackResult{}
 	if err := json.Unmarshal(raw, &ack); err != nil {
-		result.err = fmt.Errorf("failed to parse reply ack for reqId %s: %s", reqId, err.Error())
+		result.err = fmt.Errorf("failed to parse reply ack for reqId %s: %w", reqId, err)
 		m.logger.Error(result.err.Error())
 	} else if ack.ErrCode != 0 {
 		// 失败：errcode 非 0，同时提供回执帧便于诊断
