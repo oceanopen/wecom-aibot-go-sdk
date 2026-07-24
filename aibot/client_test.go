@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1090,5 +1091,178 @@ func TestReplyMedia(t *testing.T) {
 		if _, ok := gotBody[k]; ok {
 			t.Errorf("body.%s should be absent for file", k)
 		}
+	}
+}
+
+// ========== UploadMedia 分片上传（任务 27）==========
+
+// ackWithBody 构造带 body 的成功回执帧。
+func ackWithBody(reqId string, body map[string]any) []byte {
+	resp := map[string]any{
+		"headers": map[string]string{"req_id": reqId},
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    body,
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// ackErr 构造失败回执帧（errcode 非 0）。
+func ackErr(reqId string, errcode int, errmsg string) []byte {
+	resp := map[string]any{
+		"headers": map[string]string{"req_id": reqId},
+		"errcode": errcode,
+		"errmsg":  errmsg,
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// extractChunkIndex 从上传分片帧中提取 chunk_index。
+func extractChunkIndex(data []byte) int {
+	var f struct {
+		Body struct {
+			ChunkIndex int `json:"chunk_index"`
+		} `json:"body"`
+	}
+	_ = json.Unmarshal(data, &f)
+	return f.Body.ChunkIndex
+}
+
+// uploadMockState 记录 mock 上传服务端收到的分片次数。
+type uploadMockState struct {
+	mu             sync.Mutex
+	chunksReceived map[int]int // chunk_index -> 收到次数
+}
+
+// newUploadMockServer 构造上传 mock 服务端；failFirst 指定某 chunk_index 前若干次尝试返回失败（测试重试路径）。
+func newUploadMockServer(t *testing.T, failFirst map[int]int) (*mockWsServer, *uploadMockState) {
+	t.Helper()
+	st := &uploadMockState{chunksReceived: map[int]int{}}
+	srv := newMockWsServer(func(msg []byte) []byte {
+		cmd := extractCmd(msg)
+		reqId := extractReqId(msg)
+		switch cmd {
+		case types.WsCmd.Subscribe:
+			return authSuccessResponse(reqId)
+		case types.WsCmd.Heartbeat:
+			return heartbeatAckResponse(reqId)
+		case types.WsCmd.UploadMediaInit:
+			return ackWithBody(reqId, map[string]any{"upload_id": "test_upload_id"})
+		case types.WsCmd.UploadMediaChunk:
+			ci := extractChunkIndex(msg)
+			st.mu.Lock()
+			st.chunksReceived[ci]++
+			n := st.chunksReceived[ci]
+			st.mu.Unlock()
+			if n <= failFirst[ci] {
+				return ackErr(reqId, 500, "simulated chunk failure")
+			}
+			return replyAckResponse(reqId)
+		case types.WsCmd.UploadMediaFinish:
+			return ackWithBody(reqId, map[string]any{
+				"media_id":   "test_media_id",
+				"type":       "image",
+				"created_at": "2026-01-01T00:00:00Z",
+			})
+		}
+		return nil
+	})
+	return srv, st
+}
+
+func TestUploadMediaSingleChunk(t *testing.T) {
+	srv, st := newUploadMockServer(t, nil)
+	defer srv.close()
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	data := make([]byte, 100) // < 512KB → 1 分片
+	result, err := client.UploadMedia(data, types.UploadMediaOptions{Type: types.WeComMediaImage, Filename: "f.png"})
+	disconnect()
+	if err != nil {
+		t.Fatalf("UploadMedia error: %v", err)
+	}
+	if result.MediaId != "test_media_id" {
+		t.Errorf("MediaId = %q, want test_media_id", result.MediaId)
+	}
+	if result.Type != types.WeComMediaImage {
+		t.Errorf("Type = %q, want image", result.Type)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.chunksReceived[0] != 1 {
+		t.Errorf("chunk 0 received %d times, want 1", st.chunksReceived[0])
+	}
+}
+
+func TestUploadMediaMultiChunk(t *testing.T) {
+	srv, st := newUploadMockServer(t, nil)
+	defer srv.close()
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	data := make([]byte, uploadChunkSize*2+100) // 3 分片
+	result, err := client.UploadMedia(data, types.UploadMediaOptions{Type: types.WeComMediaFile, Filename: "f.bin"})
+	disconnect()
+	if err != nil {
+		t.Fatalf("UploadMedia error: %v", err)
+	}
+	if result.MediaId != "test_media_id" {
+		t.Errorf("MediaId = %q, want test_media_id", result.MediaId)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i := range 3 {
+		if st.chunksReceived[i] != 1 {
+			t.Errorf("chunk %d received %d times, want 1", i, st.chunksReceived[i])
+		}
+	}
+}
+
+func TestUploadMediaRetry(t *testing.T) {
+	// chunk 0 首次尝试失败，重试后成功（验证单片重试路径）
+	srv, st := newUploadMockServer(t, map[int]int{0: 1})
+	defer srv.close()
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	data := make([]byte, 100) // 1 分片
+	result, err := client.UploadMedia(data, types.UploadMediaOptions{Type: types.WeComMediaImage, Filename: "f.png"})
+	disconnect()
+	if err != nil {
+		t.Fatalf("UploadMedia with retry should succeed: %v", err)
+	}
+	if result.MediaId != "test_media_id" {
+		t.Errorf("MediaId = %q, want test_media_id", result.MediaId)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.chunksReceived[0] != 2 { // 1 失败 + 1 成功
+		t.Errorf("chunk 0 received %d times, want 2 (1 fail + 1 success)", st.chunksReceived[0])
+	}
+}
+
+func TestUploadMediaTooLarge(t *testing.T) {
+	srv, st := newUploadMockServer(t, nil)
+	defer srv.close()
+	client := NewWsClient(types.WsClientOptions{BotId: "b", Secret: "s", WsUrl: srv.url(), Logger: &DefaultLogger{}})
+	disconnect := connectForTest(t, client)
+
+	data := make([]byte, 101*uploadChunkSize) // 101 分片 > 100 上限
+	_, err := client.UploadMedia(data, types.UploadMediaOptions{Type: types.WeComMediaFile, Filename: "big.bin"})
+	disconnect()
+	if err == nil {
+		t.Fatal("UploadMedia should reject too-large file")
+	}
+	if !strings.Contains(err.Error(), "File too large") {
+		t.Errorf("error should mention 'File too large', got: %v", err)
+	}
+	// 拒绝后不应发起任何分片上传
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.chunksReceived) != 0 {
+		t.Errorf("no chunks should be sent for rejected file, got %d", len(st.chunksReceived))
 	}
 }

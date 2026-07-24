@@ -7,10 +7,14 @@ package aibot
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/oceanopen/wecom-aibot-go-sdk/aibot/types"
 )
@@ -453,6 +457,185 @@ func mergeChatId(chatid string, body any) (map[string]any, error) {
 	}
 	full["chatid"] = chatid
 	return full, nil
+}
+
+// ========== 上传临时素材 ==========
+
+// uploadChunkSize 单个分片大小上限（Base64 编码前），对应 Node CHUNK_SIZE = 512KB。
+const uploadChunkSize = 512 * 1024
+
+// uploadMaxChunkRetries 单个分片最大重试次数（不含首次），对应 Node MAX_CHUNK_RETRIES = 2。
+const uploadMaxChunkRetries = 2
+
+// UploadMedia 上传临时素材（三步分片上传），对应 Node uploadMedia。
+//
+// 流程：init → chunk×N → finish。单分片 512KB（Base64 编码前），最多 100 个分片（超出拒绝）。
+// 分片上传支持动态并发（≤4/3/2，按分片数）与单片重试（2 次，500ms×n 退避）。
+// 返回 media_id（3 天内有效）。
+func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions) (*types.UploadMediaFinishResult, error) {
+	mediaType := opts.Type
+	filename := opts.Filename
+	totalSize := len(fileBuffer)
+	totalChunks := totalSize / uploadChunkSize
+	if totalSize%uploadChunkSize != 0 {
+		totalChunks++
+	}
+
+	// 超大文件拒绝（最多 100 个分片，约 50MB）
+	if totalChunks > 100 {
+		return nil, fmt.Errorf("File too large: %d chunks exceeds maximum of 100 chunks (max ~50MB)", totalChunks)
+	}
+
+	// 计算文件 MD5
+	md5Sum := md5.Sum(fileBuffer)
+	md5Hex := hex.EncodeToString(md5Sum[:])
+
+	c.logger.Info(fmt.Sprintf("Uploading media: type=%s, filename=%s, size=%d, chunks=%d", mediaType, filename, totalSize, totalChunks))
+
+	// Step 1: 初始化上传
+	initReqId := GenerateReqId(types.WsCmd.UploadMediaInit)
+	initResult, err := c.wsManager.SendReply(types.WsFrameHeaders{ReqId: initReqId}, types.UploadMediaInitBody{
+		Type:        mediaType,
+		Filename:    filename,
+		TotalSize:   totalSize,
+		TotalChunks: totalChunks,
+		Md5:         md5Hex,
+	}, types.WsCmd.UploadMediaInit)
+	if err != nil {
+		return nil, err
+	}
+	var initBody types.UploadMediaInitResult
+	if err := json.Unmarshal(initResult.Body, &initBody); err != nil {
+		return nil, fmt.Errorf("Upload init failed: parse response: %s", err.Error())
+	}
+	if initBody.UploadId == "" {
+		return nil, fmt.Errorf("Upload init failed: no upload_id returned. Response: %s", string(initResult.Body))
+	}
+	uploadId := initBody.UploadId
+	c.logger.Info(fmt.Sprintf("Upload init success: upload_id=%s", uploadId))
+
+	// 单分片上传（含重试）
+	uploadChunk := func(chunkIndex int) error {
+		start := chunkIndex * uploadChunkSize
+		end := min(start+uploadChunkSize, totalSize)
+		chunk := fileBuffer[start:end]
+		base64Data := base64.StdEncoding.EncodeToString(chunk)
+
+		var lastErr error
+		for attempt := 0; attempt <= uploadMaxChunkRetries; attempt++ {
+			chunkReqId := GenerateReqId(types.WsCmd.UploadMediaChunk)
+			_, err := c.wsManager.SendReply(types.WsFrameHeaders{ReqId: chunkReqId}, types.UploadMediaChunkBody{
+				UploadId:   uploadId,
+				ChunkIndex: chunkIndex,
+				Base64Data: base64Data,
+			}, types.WsCmd.UploadMediaChunk)
+			if err == nil {
+				c.logger.Debug(fmt.Sprintf("Uploaded chunk %d/%d (%d bytes)", chunkIndex+1, totalChunks, len(chunk)))
+				return nil
+			}
+			lastErr = err
+			if attempt < uploadMaxChunkRetries {
+				delay := time.Duration(500*(attempt+1)) * time.Millisecond
+				c.logger.Warn(fmt.Sprintf("Chunk %d upload failed (attempt %d/%d), retrying in %dms... error: %s", chunkIndex, attempt+1, uploadMaxChunkRetries+1, 500*(attempt+1), err.Error()))
+				time.Sleep(delay)
+			}
+		}
+		return fmt.Errorf("Chunk %d upload failed after %d attempts: %s", chunkIndex, uploadMaxChunkRetries+1, lastErr.Error())
+	}
+
+	// Step 2: 分片上传
+	if totalChunks <= 1 {
+		// 单分片直接上传（totalChunks=0 即空文件时也上传一个空分片，对应 Node uploadChunk(0)）
+		if err := uploadChunk(0); err != nil {
+			return nil, err
+		}
+	} else {
+		// 多分片并发上传：动态并发数（≤4 分片全并发；5~10 并发 3；>10 并发 2）
+		maxConcurrency := 2
+		switch {
+		case totalChunks <= 4:
+			maxConcurrency = totalChunks
+		case totalChunks <= 10:
+			maxConcurrency = 3
+		}
+		workerCount := min(maxConcurrency, totalChunks)
+		c.logger.Debug(fmt.Sprintf("Upload concurrency: %d workers for %d chunks", workerCount, totalChunks))
+
+		idxCh := make(chan int)
+		go func() {
+			for i := 0; i < totalChunks; i++ {
+				idxCh <- i
+			}
+			close(idxCh)
+		}()
+
+		var (
+			wg        sync.WaitGroup
+			errMu     sync.Mutex
+			failCount int
+			firstErr  error
+		)
+		for range workerCount {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for idx := range idxCh {
+					if err := uploadChunk(idx); err != nil {
+						errMu.Lock()
+						failCount++
+						if firstErr == nil {
+							firstErr = err
+						}
+						errMu.Unlock()
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		if failCount > 0 {
+			return nil, fmt.Errorf("Upload failed: %d chunk(s) failed. First error: %s", failCount, firstErr.Error())
+		}
+	}
+
+	c.logger.Info(fmt.Sprintf("All %d chunks uploaded, finishing...", totalChunks))
+
+	// Step 3: 完成上传
+	finishReqId := GenerateReqId(types.WsCmd.UploadMediaFinish)
+	finishResult, err := c.wsManager.SendReply(types.WsFrameHeaders{ReqId: finishReqId}, types.UploadMediaFinishBody{
+		UploadId: uploadId,
+	}, types.WsCmd.UploadMediaFinish)
+	if err != nil {
+		return nil, err
+	}
+	var finishBody struct {
+		Type      types.WeComMediaType `json:"type"`
+		MediaId   string               `json:"media_id"`
+		CreatedAt string               `json:"created_at"`
+	}
+	if err := json.Unmarshal(finishResult.Body, &finishBody); err != nil {
+		return nil, fmt.Errorf("Upload finish failed: parse response: %s", err.Error())
+	}
+	if finishBody.MediaId == "" {
+		return nil, fmt.Errorf("Upload finish failed: no media_id returned. Response: %s", string(finishResult.Body))
+	}
+
+	// type 缺省回退为入参 type；created_at 缺省回退为当前时间（ISO 8601）
+	resultType := finishBody.Type
+	if resultType == "" {
+		resultType = mediaType
+	}
+	createdAt := finishBody.CreatedAt
+	if createdAt == "" {
+		createdAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+
+	c.logger.Info(fmt.Sprintf("Upload complete: media_id=%s, type=%s", finishBody.MediaId, resultType))
+
+	return &types.UploadMediaFinishResult{
+		Type:      resultType,
+		MediaId:   finishBody.MediaId,
+		CreatedAt: createdAt,
+	}, nil
 }
 
 // ========== 文件下载 ==========

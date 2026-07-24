@@ -96,6 +96,17 @@ var (
 	_ SendTemplateCardMsgBody
 )
 
+// ========== api.go：上传临时素材（任务 27）==========
+
+var (
+	_ UploadMediaOptions  // 上传选项
+	_ UploadMediaInitBody // 上传请求/响应 body
+	_ UploadMediaInitResult
+	_ UploadMediaChunkBody
+	_ UploadMediaFinishBody
+	_ UploadMediaFinishResult // 上传结果
+)
+
 // ========== message.go ==========
 
 var (

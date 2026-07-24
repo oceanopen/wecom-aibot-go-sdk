@@ -363,3 +363,44 @@ type SendTemplateCardMsgBody struct {
 	MsgType      string       `json:"msgtype"`       // 消息类型，固定值 template_card
 	TemplateCard TemplateCard `json:"template_card"` // 模板卡片内容
 }
+
+// ========== 上传临时素材相关类型 ==========
+
+// UploadMediaOptions uploadMedia 方法选项，对应 Node UploadMediaOptions。
+type UploadMediaOptions struct {
+	Type     WeComMediaType // 素材类型（file/image/voice/video）
+	Filename string         // 文件名
+}
+
+// UploadMediaInitBody 上传素材初始化请求 body，对应 Node UploadMediaInitBody。
+type UploadMediaInitBody struct {
+	Type        WeComMediaType `json:"type"`          // 素材类型
+	Filename    string         `json:"filename"`      // 文件名
+	TotalSize   int            `json:"total_size"`    // 文件总大小（字节）
+	TotalChunks int            `json:"total_chunks"`  // 分片总数
+	Md5         string         `json:"md5,omitempty"` // 文件 MD5 值（可选）
+}
+
+// UploadMediaInitResult 上传素材初始化响应 body，对应 Node UploadMediaInitResult。
+type UploadMediaInitResult struct {
+	UploadId string `json:"upload_id"` // 上传会话 ID
+}
+
+// UploadMediaChunkBody 上传素材分片请求 body，对应 Node UploadMediaChunkBody。
+type UploadMediaChunkBody struct {
+	UploadId   string `json:"upload_id"`   // 上传会话 ID
+	ChunkIndex int    `json:"chunk_index"` // 分片索引（从 0 开始）
+	Base64Data string `json:"base64_data"` // 分片数据（Base64 编码）
+}
+
+// UploadMediaFinishBody 完成上传请求 body，对应 Node UploadMediaFinishBody。
+type UploadMediaFinishBody struct {
+	UploadId string `json:"upload_id"` // 上传会话 ID
+}
+
+// UploadMediaFinishResult 完成上传响应（即 uploadMedia 返回值），对应 Node UploadMediaFinishResult。
+type UploadMediaFinishResult struct {
+	Type      WeComMediaType `json:"type"`       // 素材类型
+	MediaId   string         `json:"media_id"`   // 临时素材 media_id（3 天内有效）
+	CreatedAt string         `json:"created_at"` // 创建时间（ISO 8601）
+}
