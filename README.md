@@ -39,7 +39,13 @@ import (
 export WECOM_BOT_ID=your-bot-id
 export WECOM_BOT_SECRET=your-bot-secret
 
-go run ./examples/basic
+go run ./examples/basic/main.go
+```
+
+或者
+
+```bash
+WECOM_BOT_ID=your-bot-id WECOM_BOT_SECRET=your-bot-secret go run examples/basic/main.go
 ```
 
 ```go

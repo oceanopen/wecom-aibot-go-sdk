@@ -16,8 +16,14 @@ import (
 
 func main() {
 	// 凭证优先取环境变量，便于不提交密钥；缺省占位需替换为真实值
-	botId := envOr("WECOM_BOT_ID", "your-bot-id")
-	secret := envOr("WECOM_BOT_SECRET", "your-bot-secret")
+	botId := envOr("WECOM_BOT_ID", "")
+	secret := envOr("WECOM_BOT_SECRET", "")
+
+	// TODO: 增加 botId 和 secret 的非空校验
+	if botId == "" || secret == "" {
+		fmt.Println("❌ 请设置 WECOM_BOT_ID 和 WECOM_BOT_SECRET 环境变量")
+		return
+	}
 
 	// 创建 WsClient 实例
 	client := aibot.NewWsClient(aibot.WsClientOptions{
