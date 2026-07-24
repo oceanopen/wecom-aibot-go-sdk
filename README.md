@@ -223,8 +223,6 @@ go run ./examples/basic
 
 ## 项目结构
 
-1:1 镜像 Node `src/`，无 `internal/`：
-
 ```
 aibot/                       # 包 aibot
 ├── index.go                 # 跨包 re-export（Go 1.24 泛型别名）
