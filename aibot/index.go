@@ -133,3 +133,135 @@ type DisconnectedEventData = types.DisconnectedEventData
 
 // EventMessage 事件回调消息结构，重新导出 types.EventMessage。
 type EventMessage = types.EventMessage
+
+// ========== types/api.go：回复通用子结构（任务 24）==========
+
+// ReplyMsgItem 回复图文混排子项，重新导出 types.ReplyMsgItem。
+type ReplyMsgItem = types.ReplyMsgItem
+
+// ReplyFeedback 回复反馈信息，重新导出 types.ReplyFeedback。
+type ReplyFeedback = types.ReplyFeedback
+
+// ========== types/api.go：模板卡片及子结构（任务 24）==========
+
+// TemplateCardType 卡片类型常量，重新导出 types.TemplateCardType。
+var TemplateCardType = types.TemplateCardType
+
+// TemplateCard 模板卡片结构，重新导出 types.TemplateCard。
+type TemplateCard = types.TemplateCard
+
+// TemplateCardSource 卡片来源样式，重新导出 types.TemplateCardSource。
+type TemplateCardSource = types.TemplateCardSource
+
+// TemplateCardActionMenu 卡片右上角更多操作，重新导出 types.TemplateCardActionMenu。
+type TemplateCardActionMenu = types.TemplateCardActionMenu
+
+// TemplateCardMainTitle 模板卡片主标题，重新导出 types.TemplateCardMainTitle。
+type TemplateCardMainTitle = types.TemplateCardMainTitle
+
+// TemplateCardEmphasisContent 关键数据样式，重新导出 types.TemplateCardEmphasisContent。
+type TemplateCardEmphasisContent = types.TemplateCardEmphasisContent
+
+// TemplateCardQuoteArea 引用文献样式，重新导出 types.TemplateCardQuoteArea。
+type TemplateCardQuoteArea = types.TemplateCardQuoteArea
+
+// TemplateCardHorizontalContent 二级标题+文本列表项，重新导出 types.TemplateCardHorizontalContent。
+type TemplateCardHorizontalContent = types.TemplateCardHorizontalContent
+
+// TemplateCardJumpAction 跳转指引样式，重新导出 types.TemplateCardJumpAction。
+type TemplateCardJumpAction = types.TemplateCardJumpAction
+
+// TemplateCardAction 整体卡片点击跳转事件，重新导出 types.TemplateCardAction。
+type TemplateCardAction = types.TemplateCardAction
+
+// TemplateCardVerticalContent 卡片二级垂直内容，重新导出 types.TemplateCardVerticalContent。
+type TemplateCardVerticalContent = types.TemplateCardVerticalContent
+
+// TemplateCardImage 图片样式，重新导出 types.TemplateCardImage。
+type TemplateCardImage = types.TemplateCardImage
+
+// TemplateCardImageTextArea 左图右文样式，重新导出 types.TemplateCardImageTextArea。
+type TemplateCardImageTextArea = types.TemplateCardImageTextArea
+
+// TemplateCardSubmitButton 提交按钮样式，重新导出 types.TemplateCardSubmitButton。
+type TemplateCardSubmitButton = types.TemplateCardSubmitButton
+
+// TemplateCardSelectionItem 下拉式选择器，重新导出 types.TemplateCardSelectionItem。
+type TemplateCardSelectionItem = types.TemplateCardSelectionItem
+
+// TemplateCardButton 模板卡片按钮，重新导出 types.TemplateCardButton。
+type TemplateCardButton = types.TemplateCardButton
+
+// TemplateCardCheckbox 选择题样式，重新导出 types.TemplateCardCheckbox。
+type TemplateCardCheckbox = types.TemplateCardCheckbox
+
+// ========== types/api.go：回复消息体（任务 24）==========
+
+// StreamReply 流式回复内容对象，重新导出 types.StreamReply。
+type StreamReply = types.StreamReply
+
+// StreamReplyBody 流式回复消息体，重新导出 types.StreamReplyBody。
+type StreamReplyBody = types.StreamReplyBody
+
+// WelcomeTextReplyBody 欢迎语文本回复体，重新导出 types.WelcomeTextReplyBody。
+type WelcomeTextReplyBody = types.WelcomeTextReplyBody
+
+// WelcomeTemplateCardReplyBody 欢迎语模板卡片回复体，重新导出 types.WelcomeTemplateCardReplyBody。
+type WelcomeTemplateCardReplyBody = types.WelcomeTemplateCardReplyBody
+
+// TemplateCardReplyBody 模板卡片回复体，重新导出 types.TemplateCardReplyBody。
+type TemplateCardReplyBody = types.TemplateCardReplyBody
+
+// StreamWithTemplateCardReplyBody 流式+模板卡片组合回复体，重新导出 types.StreamWithTemplateCardReplyBody。
+type StreamWithTemplateCardReplyBody = types.StreamWithTemplateCardReplyBody
+
+// UpdateTemplateCardBody 更新模板卡片消息体，重新导出 types.UpdateTemplateCardBody。
+type UpdateTemplateCardBody = types.UpdateTemplateCardBody
+
+// ========== types/api.go：媒体类型 + 主动发送体（任务 26）==========
+
+// WeComMediaType 企业微信媒体类型，重新导出 types.WeComMediaType。
+type WeComMediaType = types.WeComMediaType
+
+// 媒体类型取值常量，重新导出 types.WeComMedia*。
+const (
+	WeComMediaFile  = types.WeComMediaFile
+	WeComMediaImage = types.WeComMediaImage
+	WeComMediaVoice = types.WeComMediaVoice
+	WeComMediaVideo = types.WeComMediaVideo
+)
+
+// SendMediaContent 媒体消息内容，重新导出 types.SendMediaContent。
+type SendMediaContent = types.SendMediaContent
+
+// SendVideoContent 视频消息内容，重新导出 types.SendVideoContent。
+type SendVideoContent = types.SendVideoContent
+
+// SendMediaMsgBody 媒体消息发送体，重新导出 types.SendMediaMsgBody。
+type SendMediaMsgBody = types.SendMediaMsgBody
+
+// SendMarkdownMsgBody 主动发送 Markdown 消息体，重新导出 types.SendMarkdownMsgBody。
+type SendMarkdownMsgBody = types.SendMarkdownMsgBody
+
+// SendTemplateCardMsgBody 主动发送模板卡片消息体，重新导出 types.SendTemplateCardMsgBody。
+type SendTemplateCardMsgBody = types.SendTemplateCardMsgBody
+
+// ========== types/api.go：上传临时素材（任务 27）==========
+
+// UploadMediaOptions uploadMedia 选项，重新导出 types.UploadMediaOptions。
+type UploadMediaOptions = types.UploadMediaOptions
+
+// UploadMediaInitBody 上传初始化请求体，重新导出 types.UploadMediaInitBody。
+type UploadMediaInitBody = types.UploadMediaInitBody
+
+// UploadMediaInitResult 上传初始化响应体，重新导出 types.UploadMediaInitResult。
+type UploadMediaInitResult = types.UploadMediaInitResult
+
+// UploadMediaChunkBody 上传分片请求体，重新导出 types.UploadMediaChunkBody。
+type UploadMediaChunkBody = types.UploadMediaChunkBody
+
+// UploadMediaFinishBody 完成上传请求体，重新导出 types.UploadMediaFinishBody。
+type UploadMediaFinishBody = types.UploadMediaFinishBody
+
+// UploadMediaFinishResult 上传结果，重新导出 types.UploadMediaFinishResult。
+type UploadMediaFinishResult = types.UploadMediaFinishResult

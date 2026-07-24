@@ -132,3 +132,77 @@ func TestReExportEventTypes(t *testing.T) {
 	_ = FeedbackEventData{}
 	_ = DisconnectedEventData{}
 }
+
+// TestReExportTemplateCard 验证模板卡片及子结构、TemplateCardType 可从 aibot 包引用（任务 24）。
+func TestReExportTemplateCard(t *testing.T) {
+	if TemplateCardType.TextNotice != "text_notice" {
+		t.Errorf("TemplateCardType.TextNotice = %q, want text_notice", TemplateCardType.TextNotice)
+	}
+	card := TemplateCard{
+		CardType:   TemplateCardType.ButtonInteraction,
+		MainTitle:  &TemplateCardMainTitle{Title: "标题"},
+		CardAction: &TemplateCardAction{Type: 1, Url: "https://example.com"},
+		ButtonList: []TemplateCardButton{{Text: "确认", Key: "ok"}},
+		TaskId:     "task_001",
+		Feedback:   &ReplyFeedback{Id: "fb_001"},
+	}
+	data, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal TemplateCard: %v", err)
+	}
+	var decoded TemplateCard
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal TemplateCard: %v", err)
+	}
+	if decoded.TaskId != "task_001" || decoded.CardAction.Type != 1 {
+		t.Errorf("TemplateCard round-trip mismatch: %+v", decoded)
+	}
+	// 回复体别名可用
+	_ = TemplateCardReplyBody{MsgType: "template_card", TemplateCard: card}
+	_ = StreamReplyBody{MsgType: "stream", Stream: StreamReply{Id: "s1"}}
+	_ = WelcomeTextReplyBody{MsgType: "text"}
+	_ = StreamWithTemplateCardReplyBody{MsgType: "stream_with_template_card"}
+	_ = UpdateTemplateCardBody{ResponseType: "update_template_card"}
+}
+
+// TestReExportMediaAndSend 验证媒体类型常量与主动发送体可从 aibot 包引用（任务 26）。
+func TestReExportMediaAndSend(t *testing.T) {
+	if WeComMediaImage != "image" {
+		t.Errorf("WeComMediaImage = %q, want image", WeComMediaImage)
+	}
+	var mt WeComMediaType = WeComMediaVideo
+	if mt != "video" {
+		t.Errorf("WeComMediaType = %q, want video", mt)
+	}
+	// 媒体发送体：仅设置匹配字段
+	body := SendMediaMsgBody{MsgType: WeComMediaImage, Image: &SendMediaContent{MediaId: "mid"}}
+	data, _ := json.Marshal(body)
+	var m map[string]any
+	_ = json.Unmarshal(data, &m)
+	if m["msgtype"] != "image" || m["image"] == nil {
+		t.Errorf("SendMediaMsgBody json = %s", data)
+	}
+	for _, k := range []string{"file", "voice", "video"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("SendMediaMsgBody.%s should be absent for image", k)
+		}
+	}
+	_ = SendMarkdownMsgBody{}
+	_ = SendVideoContent{}
+}
+
+// TestReExportUploadTypes 验证上传相关类型可从 aibot 包引用（任务 27）。
+func TestReExportUploadTypes(t *testing.T) {
+	opts := UploadMediaOptions{Type: WeComMediaFile, Filename: "f.bin"}
+	if opts.Type != WeComMediaFile || opts.Filename != "f.bin" {
+		t.Errorf("UploadMediaOptions = %+v", opts)
+	}
+	result := UploadMediaFinishResult{Type: WeComMediaImage, MediaId: "mid", CreatedAt: "2026-01-01T00:00:00Z"}
+	if result.MediaId != "mid" {
+		t.Errorf("UploadMediaFinishResult.MediaId = %q", result.MediaId)
+	}
+	// 上传请求体别名可用
+	_ = UploadMediaInitBody{Type: WeComMediaFile, Filename: "f", TotalSize: 1, TotalChunks: 1}
+	_ = UploadMediaChunkBody{UploadId: "uid", ChunkIndex: 0, Base64Data: "AA=="}
+	_ = UploadMediaFinishBody{UploadId: "uid"}
+}

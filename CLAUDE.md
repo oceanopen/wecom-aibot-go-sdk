@@ -18,6 +18,21 @@
 - `aibot/types/`（子包 `types`）：`index.go` / `config.go` / `common.go` / `message.go` / `event.go` / `api.go`
 - `aibot/index.go` 镜像 Node `src/index.ts`，把 `aibot/types` 的公开符号重新导出到 `aibot`，使用户仅 import `aibot`。
 
+## 架构总览
+
+`WsClient`（`client.go`）是对外门面，聚合三个协作组件：
+
+- **`WsConnectionManager`**（`ws.go`）：WebSocket 连接核心。拨号 → 认证 → 心跳 → 指数退避重连（认证失败/连接断开两套计数器，`-1` 无限）；维护按 `req_id` 分组的回复队列（同一 reqId 串行，不同 reqId 可并发），发一条 → 等 ack/超时 → 下一条。
+- **`MessageHandler`**（`message-handler.go`）：消息/事件分发。探针解析 `cmd`+`msgtype`/`eventtype`，路由到 `WsClient` 的类型化回调（`OnText`/`OnImage`/…/`OnEnterChat`/…）。
+- **`WeComApiClient`**（`api.go`）：仅负责 HTTP 文件下载（解析 `Content-Disposition`），消息收发均走 WebSocket。
+
+数据流：
+- **收**：服务端帧 → `ws.readLoop` → `handleFrame` 路由（认证/心跳响应、`disconnected_event`、消息/事件回调）→ `onMessage` → `MessageHandler.HandleFrame` → 类型化回调。
+- **回复**：`client.Reply*` → `wsManager.SendReply(frame, body, cmd)`（首参 `WsFrameHeaders`，透传 `req_id`）→ 串行队列 + 等 ack。
+- **主动发送**：`SendMessage` 生成新 `req_id`，把 `chatid` 合并进 body，走 `SendMsg` 通道。
+- **上传**：`UploadMedia` 三步（init→chunk×N→finish），多分片动态并发（≤4/3/2 worker pool，不同 reqId 并发），单片失败重试 2 次。
+- **加解密**：`DecryptFile`（文件附件，消息自带 `aeskey`，AES-256-CBC + PKCS#7 块 32）/ `WecomCrypto`（Webhook，`EncodingAesKey` + SHA1 签名）。
+
 ## 代码风格
 
 - **字符串拼接一律用 `fmt.Sprintf`**，禁止 `"a" + x + "b"` 风格的 `+` 拼接。
