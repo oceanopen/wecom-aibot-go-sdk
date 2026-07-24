@@ -58,23 +58,30 @@ func main() {
 		content := frame.Body.Text.Content
 		fmt.Printf("📝 收到文本消息: %s\n", content)
 
+		// 拷贝 headers（值类型）供 goroutine 安全使用，避免持有回调帧指针
+		headers := frame.Headers
 		// 生成流式消息 ID（同一会话内多次刷新使用相同 ID）
 		streamId := aibot.GenerateReqId("stream")
 
-		// 发送流式中间帧（finish=false）
-		if _, err := client.ReplyStream(frame.Headers, streamId, "正在思考...", false, nil, nil); err != nil {
-			fmt.Printf("流式中间帧失败: %v\n", err)
-			return
-		}
+		// 流式回复在后台发送，避免阻塞消息回调。
+		// 服务端对流式中间帧（finish=false）的 ack 固有延迟约 5s，紧贴 replyAckTimeout(5000ms)，
+		// 不应视为致命错误：「正在思考...」一经发出即展示给用户，中间帧 ack 超时仅记录，不影响最终帧。
+		// （镜像 Node examples/basic.ts：流式帧 fire-and-forget，不 await 中间帧 ack）
+		go func() {
+			// 中间帧：ack 超时可忽略
+			if _, err := client.ReplyStream(headers, streamId, "正在思考...", false, nil, nil); err != nil {
+				fmt.Printf("（中间帧 ack 未及时确认，可忽略）: %v\n", err)
+			}
 
-		// 模拟异步处理后发送最终结果
-		time.Sleep(500 * time.Millisecond)
-		reply := fmt.Sprintf("你好！你说的是：%s", content)
-		if _, err := client.ReplyStream(frame.Headers, streamId, reply, true, nil, nil); err != nil {
-			fmt.Printf("流式最终帧失败: %v\n", err)
-			return
-		}
-		fmt.Println("✅ 流式回复完成")
+			// 模拟异步处理后发送最终结果
+			time.Sleep(500 * time.Millisecond)
+			reply := fmt.Sprintf("你好！你说的是：%s", content)
+			if _, err := client.ReplyStream(headers, streamId, reply, true, nil, nil); err != nil {
+				fmt.Printf("流式最终帧失败: %v\n", err)
+				return
+			}
+			fmt.Println("✅ 流式回复完成")
+		}()
 	}
 
 	// SIGINT/SIGTERM 触发优雅退出
