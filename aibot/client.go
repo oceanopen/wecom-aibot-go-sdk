@@ -24,6 +24,7 @@ type WsClient struct {
 	logger         types.Logger          // 日志实现
 	wsManager      *WsConnectionManager  // WebSocket 连接管理器
 	messageHandler *MessageHandler       // 消息分发处理器
+	apiClient      *WeComApiClient       // HTTP API 客户端（仅文件下载），对应 Node apiClient
 
 	mu      sync.Mutex // 保护 started
 	started bool       // 是否已启动（防重复 Connect/Disconnect）
@@ -92,6 +93,9 @@ func NewWsClient(opts types.WsClientOptions) *WsClient {
 		options: opts,
 		logger:  opts.Logger,
 	}
+
+	// 初始化 API 客户端（仅用于文件下载），对应 Node new WeComApiClient(logger, requestTimeout)
+	c.apiClient = NewWeComApiClient(c.logger, opts.RequestTimeout)
 
 	// 初始化 WebSocket 管理器（参数顺序镜像 NewWsConnectionManager）
 	c.wsManager = NewWsConnectionManager(
@@ -283,4 +287,43 @@ func (c *WsClient) ReplyStreamNonBlocking(frame types.WsFrameHeaders, streamId, 
 // 用于流式场景：调用方可据此决定是否跳过当前中间帧，避免排队积压。
 func (c *WsClient) HasPendingReplyAck(frame types.WsFrameHeaders) bool {
 	return c.wsManager.HasPendingAck(frame.ReqId)
+}
+
+// ========== 文件下载 ==========
+
+// DownloadFile 下载文件并使用 AES 密钥解密，对应 Node downloadFile。
+//
+// url 为文件下载地址；aesKey 取自消息体中的 image.aeskey / file.aeskey（Base64 编码）。
+// aesKey 为空时直接返回未解密的原始数据（并告警）。返回解密后的字节与文件名。
+func (c *WsClient) DownloadFile(url, aesKey string) ([]byte, string, error) {
+	c.logger.Debug(fmt.Sprintf("[plugin] downloadFile: url=%s, hasAesKey=%t", url, aesKey != ""))
+	c.logger.Info("Downloading and decrypting file...")
+
+	// 下载加密的文件数据
+	encrypted, filename, err := c.apiClient.DownloadFileRaw(url)
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("File download/decrypt failed: %s", err.Error()))
+		return nil, "", err
+	}
+
+	// 没有提供 aesKey，直接返回原始数据
+	if aesKey == "" {
+		c.logger.Warn("No aesKey provided, returning raw file data")
+		return encrypted, filename, nil
+	}
+
+	// 使用独立的解密模块进行 AES-256-CBC 解密
+	decrypted, err := DecryptFile(encrypted, aesKey)
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("File download/decrypt failed: %s", err.Error()))
+		return nil, "", err
+	}
+
+	c.logger.Info("File downloaded and decrypted successfully")
+	return decrypted, filename, nil
+}
+
+// Api 返回内部 WeComApiClient 实例，对应 Node get api()（供文件下载等高级用途）。
+func (c *WsClient) Api() *WeComApiClient {
+	return c.apiClient
 }

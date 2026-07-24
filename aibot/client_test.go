@@ -2,6 +2,7 @@ package aibot
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -608,5 +609,98 @@ func TestDisconnectedEventNoReconnect(t *testing.T) {
 	}
 	if client.IsConnected() {
 		t.Error("client should be disconnected after disconnected_event")
+	}
+}
+
+// ========== DownloadFile（mock http + 加密往返解密）==========
+
+// newWsClientNoConn 构造一个未连接的 WsClient，仅用于文件下载测试。
+func newWsClientNoConn(t *testing.T) *WsClient {
+	t.Helper()
+	return NewWsClient(types.WsClientOptions{
+		BotId:  "test_bot",
+		Secret: "test_secret",
+		Logger: &DefaultLogger{},
+	})
+}
+
+// TestWsClientDownloadFileDecrypt 验证下载 + AES-256-CBC 解密往返，且文件名从 Content-Disposition 解析。
+func TestWsClientDownloadFileDecrypt(t *testing.T) {
+	key, aesKey := testAesKey(t)
+	plain := []byte("confidential attachment content")
+	encrypted := encryptForTest(t, plain, key)
+
+	srv := newDownloadServer(t, 200, "application/octet-stream",
+		`attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A.txt`, encrypted)
+	defer srv.Close()
+
+	client := newWsClientNoConn(t)
+	got, filename, err := client.DownloadFile(srv.URL, aesKey)
+	if err != nil {
+		t.Fatalf("DownloadFile error: %v", err)
+	}
+	if string(got) != string(plain) {
+		t.Errorf("decrypted body = %q, want %q", got, plain)
+	}
+	if filename != "报告.txt" {
+		t.Errorf("filename = %q, want %q", filename, "报告.txt")
+	}
+}
+
+// TestWsClientDownloadFileNoAesKey 验证无 aesKey 时返回未解密的原始数据。
+func TestWsClientDownloadFileNoAesKey(t *testing.T) {
+	raw := []byte("raw-bytes-not-encrypted")
+	srv := newDownloadServer(t, 200, "application/octet-stream", "", raw)
+	defer srv.Close()
+
+	client := newWsClientNoConn(t)
+	got, _, err := client.DownloadFile(srv.URL, "")
+	if err != nil {
+		t.Fatalf("DownloadFile error: %v", err)
+	}
+	if string(got) != string(raw) {
+		t.Errorf("raw body = %q, want %q", got, raw)
+	}
+}
+
+// TestWsClientDownloadFileWrongAesKey 验证错误 aesKey 解密失败报错。
+func TestWsClientDownloadFileWrongAesKey(t *testing.T) {
+	key1, _ := testAesKey(t)
+	key2 := make([]byte, 32)
+	for i := range key2 {
+		key2[i] = byte(i + 100)
+	}
+	wrongAesKey := base64.StdEncoding.EncodeToString(key2)
+
+	plain := []byte("sensitive payload")
+	encrypted := encryptForTest(t, plain, key1)
+
+	srv := newDownloadServer(t, 200, "application/octet-stream", "", encrypted)
+	defer srv.Close()
+
+	client := newWsClientNoConn(t)
+	_, _, err := client.DownloadFile(srv.URL, wrongAesKey)
+	if err == nil {
+		t.Error("DownloadFile with wrong aesKey should fail")
+	}
+}
+
+// TestWsClientDownloadFileDownloadFails 验证下载失败（404）时返回错误。
+func TestWsClientDownloadFileDownloadFails(t *testing.T) {
+	srv := newDownloadServer(t, 404, "text/plain", "", []byte("not found"))
+	defer srv.Close()
+
+	client := newWsClientNoConn(t)
+	_, _, err := client.DownloadFile(srv.URL, "someAesKey")
+	if err == nil {
+		t.Error("DownloadFile on 404 should fail")
+	}
+}
+
+// TestWsClientApiGetter 验证 Api() 返回内部 apiClient（非空）。
+func TestWsClientApiGetter(t *testing.T) {
+	client := newWsClientNoConn(t)
+	if client.Api() == nil {
+		t.Error("Api() should return non-nil apiClient")
 	}
 }
