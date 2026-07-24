@@ -90,7 +90,7 @@ func NewWsClient(opts types.WsClientOptions) *WsClient {
 		opts.MaxReplyQueueSize = 500
 	}
 	if opts.Logger == nil {
-		opts.Logger = &DefaultLogger{}
+		opts.Logger = NewDefaultLogger("") // 走默认前缀 "AiBotSDK"，避免零值构造导致 prefix 为空
 	}
 
 	c := &WsClient{
