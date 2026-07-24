@@ -50,7 +50,7 @@ func DecryptFile(encrypted []byte, aesKey string) ([]byte, error) {
 	// 手动去除 PKCS#7 填充（支持 32 字节 block）
 	unpadded, err := Pkcs7Unpad(dst, Pkcs7BlockSize)
 	if err != nil {
-		return nil, fmt.Errorf("decryptFile: Decryption failed - %s. This may indicate corrupted data or an incorrect aesKey.", err.Error())
+		return nil, fmt.Errorf("decryptFile: Decryption failed - %s. This may indicate corrupted data or an incorrect aesKey", err.Error())
 	}
 	return unpadded, nil
 }

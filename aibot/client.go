@@ -2,8 +2,8 @@ package aibot
 
 // client.go 对应 Node src/client.ts：WsClient 核心客户端。
 //
-// 任务 15：WsClient 结构 + NewWsClient（兜底默认值）+ Connect/Disconnect/IsConnected + 回调桥接。
-// 后续任务（17/22/25/26/27）补全 Reply/SendMessage/UploadMedia/DownloadFile 等。
+// 持有 WsConnectionManager（连接管理）与 MessageHandler（消息分发），通过回调字段暴露连接
+// 生命周期与消息/事件，并提供回复 / 主动发送 / 媒体 / 分片上传 / 文件下载等能力。
 
 import (
 	"context"
@@ -33,7 +33,7 @@ type WsClient struct {
 	mu      sync.Mutex // 保护 started
 	started bool       // 是否已启动（防重复 Connect/Disconnect）
 
-	// ========== 消息回调（任务 16 分发） ==========
+	// ========== 消息回调 ==========
 	OnMessage func(frame *types.WsFrame[types.BaseMessage])  // 收到消息（所有类型），body 为 BaseMessage
 	OnText    func(frame *types.WsFrame[types.TextMessage])  // 文本消息
 	OnImage   func(frame *types.WsFrame[types.ImageMessage]) // 图片消息
@@ -42,7 +42,7 @@ type WsClient struct {
 	OnFile    func(frame *types.WsFrame[types.FileMessage])  // 文件消息
 	OnVideo   func(frame *types.WsFrame[types.VideoMessage]) // 视频消息
 
-	// ========== 事件回调（任务 16/19 分发） ==========
+	// ========== 事件回调 ==========
 	OnEvent             func(frame *types.WsFrame[types.EventMessage]) // 收到事件回调（所有事件类型）
 	OnEnterChat         func(frame *types.WsFrame[types.EventMessage]) // 进入会话事件
 	OnTemplateCardEvent func(frame *types.WsFrame[types.EventMessage]) // 模板卡片事件
@@ -251,23 +251,23 @@ func (c *WsClient) Reply(frame types.WsFrameHeaders, body any, cmd string) (*typ
 // 同一 streamId 的多次调用刷新内容；finish=true 结束流式消息。
 // msgItem 仅在 finish=true 时附带（图文混排项）；feedback 仅在首次回复时设置。
 // 阻塞至收到回执，返回回执帧。
-func (c *WsClient) ReplyStream(frame types.WsFrameHeaders, streamId, content string, finish bool, msgItem any, feedback any) (*types.WsFrame[json.RawMessage], error) {
-	stream := map[string]any{
-		"id":      streamId,
-		"finish":  finish,
-		"content": content,
+func (c *WsClient) ReplyStream(frame types.WsFrameHeaders, streamId, content string, finish bool, msgItem []types.ReplyMsgItem, feedback *types.ReplyFeedback) (*types.WsFrame[json.RawMessage], error) {
+	stream := types.StreamReply{
+		Id:      streamId,
+		Finish:  finish,
+		Content: content,
 	}
 	// msg_item 仅在 finish=true 时支持
-	if finish && msgItem != nil {
-		stream["msg_item"] = msgItem
+	if finish && len(msgItem) > 0 {
+		stream.MsgItem = msgItem
 	}
 	// feedback 仅在首次回复时设置
 	if feedback != nil {
-		stream["feedback"] = feedback
+		stream.Feedback = feedback
 	}
-	body := map[string]any{
-		"msgtype": "stream",
-		"stream":  stream,
+	body := types.StreamReplyBody{
+		MsgType: "stream",
+		Stream:  stream,
 	}
 	return c.Reply(frame, body, types.WsCmd.Response)
 }
@@ -277,7 +277,7 @@ func (c *WsClient) ReplyStream(frame types.WsFrameHeaders, streamId, content str
 // 若上一条同 reqId 的回复尚未收到 ack 且当前帧非最终帧（finish=false），则跳过本次发送，
 // 返回 ErrReplySkipped，避免流式中间帧排队积压导致延迟。
 // finish=true 的最终帧始终保证发送（走正常队列）。
-func (c *WsClient) ReplyStreamNonBlocking(frame types.WsFrameHeaders, streamId, content string, finish bool, msgItem any, feedback any) (*types.WsFrame[json.RawMessage], error) {
+func (c *WsClient) ReplyStreamNonBlocking(frame types.WsFrameHeaders, streamId, content string, finish bool, msgItem []types.ReplyMsgItem, feedback *types.ReplyFeedback) (*types.WsFrame[json.RawMessage], error) {
 	// finish=true 的最终帧必须发送，不做跳过判断
 	if !finish && c.HasPendingReplyAck(frame) {
 		return nil, ErrReplySkipped
@@ -483,7 +483,7 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 
 	// 超大文件拒绝（最多 100 个分片，约 50MB）
 	if totalChunks > 100 {
-		return nil, fmt.Errorf("File too large: %d chunks exceeds maximum of 100 chunks (max ~50MB)", totalChunks)
+		return nil, fmt.Errorf("file too large: %d chunks exceeds maximum of 100 chunks (max ~50MB)", totalChunks)
 	}
 
 	// 计算文件 MD5
@@ -506,10 +506,10 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 	}
 	var initBody types.UploadMediaInitResult
 	if err := json.Unmarshal(initResult.Body, &initBody); err != nil {
-		return nil, fmt.Errorf("Upload init failed: parse response: %s", err.Error())
+		return nil, fmt.Errorf("upload init failed: parse response: %s", err.Error())
 	}
 	if initBody.UploadId == "" {
-		return nil, fmt.Errorf("Upload init failed: no upload_id returned. Response: %s", string(initResult.Body))
+		return nil, fmt.Errorf("upload init failed: no upload_id returned. Response: %s", string(initResult.Body))
 	}
 	uploadId := initBody.UploadId
 	c.logger.Info(fmt.Sprintf("Upload init success: upload_id=%s", uploadId))
@@ -540,7 +540,7 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 				time.Sleep(delay)
 			}
 		}
-		return fmt.Errorf("Chunk %d upload failed after %d attempts: %s", chunkIndex, uploadMaxChunkRetries+1, lastErr.Error())
+		return fmt.Errorf("chunk %d upload failed after %d attempts: %s", chunkIndex, uploadMaxChunkRetries+1, lastErr.Error())
 	}
 
 	// Step 2: 分片上传
@@ -593,7 +593,7 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 		}
 		wg.Wait()
 		if failCount > 0 {
-			return nil, fmt.Errorf("Upload failed: %d chunk(s) failed. First error: %s", failCount, firstErr.Error())
+			return nil, fmt.Errorf("upload failed: %d chunk(s) failed. First error: %s", failCount, firstErr.Error())
 		}
 	}
 
@@ -613,10 +613,10 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 		CreatedAt string               `json:"created_at"`
 	}
 	if err := json.Unmarshal(finishResult.Body, &finishBody); err != nil {
-		return nil, fmt.Errorf("Upload finish failed: parse response: %s", err.Error())
+		return nil, fmt.Errorf("upload finish failed: parse response: %s", err.Error())
 	}
 	if finishBody.MediaId == "" {
-		return nil, fmt.Errorf("Upload finish failed: no media_id returned. Response: %s", string(finishResult.Body))
+		return nil, fmt.Errorf("upload finish failed: no media_id returned. Response: %s", string(finishResult.Body))
 	}
 
 	// type 缺省回退为入参 type；created_at 缺省回退为当前时间（ISO 8601）
@@ -626,7 +626,8 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 	}
 	createdAt := finishBody.CreatedAt
 	if createdAt == "" {
-		createdAt = time.Now().UTC().Format(time.RFC3339Nano)
+		// 对齐 Node new Date().toISOString()：UTC + 固定 3 位毫秒 + Z
+		createdAt = time.Now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 	}
 
 	c.logger.Info(fmt.Sprintf("Upload complete: media_id=%s, type=%s", finishBody.MediaId, resultType))

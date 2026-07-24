@@ -2,9 +2,8 @@ package aibot
 
 // message-handler.go 对应 Node src/message-handler.ts：MessageHandler 消息/事件分发处理器。
 //
-// 任务 15：MessageHandler 结构 + 构造。
-// 任务 16：按 cmd+msgtype 二次解码分发（文本 OnText + 事件 OnEvent）。
-// 任务 19：补全其余消息类型（OnImage/OnMixed/OnVoice/OnFile/OnVideo）与类型化事件分发（OnEnterChat 等）。
+// 持有 WsClient 引用，按 cmd + msgtype/eventtype 二次解码后路由到类型化回调：
+// 文本/图片/图文/语音/文件/视频消息与进入会话/模板卡片/反馈/断开事件。
 
 import (
 	"encoding/json"

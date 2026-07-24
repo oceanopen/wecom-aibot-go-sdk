@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -169,9 +170,7 @@ func (m *WsConnectionManager) connectOnce() error {
 
 	// 构建请求 Header
 	header := http.Header{}
-	for k, v := range m.wsOptions.Header {
-		header[k] = v
-	}
+	maps.Copy(header, m.wsOptions.Header)
 
 	// 拨号
 	ws, _, err := dialer.DialContext(context.Background(), m.wsUrl, header)
@@ -244,15 +243,15 @@ func (m *WsConnectionManager) readLoop() {
 		}
 
 		// 解析帧
-		var frame json.RawMessage
-		frame = message
+		var frame json.RawMessage = message
 		m.handleFrame(frame)
 	}
 }
 
 // handleFrame 处理收到的帧数据，对应 Node handleFrame。
 //
-// 任务 11 仅实现认证响应路由；心跳/事件/回复回执在后续任务补充。
+// 路由：无 cmd 帧按 req_id 前缀区分认证/心跳响应，否则按 pendingAcks 匹配回复回执；
+// 有 cmd 帧按 cmd 分发消息/事件回调（disconnected_event 触发服务端断连处理）。
 func (m *WsConnectionManager) handleFrame(raw json.RawMessage) {
 	// 先解析出 cmd 和 headers.req_id 以路由
 	var probe struct {
@@ -277,12 +276,12 @@ func (m *WsConnectionManager) handleFrame(raw json.RawMessage) {
 			m.handleAuthResponse(probe.ErrCode, probe.ErrMsg)
 			return
 		}
-		// 心跳响应（req_id 以 ping 开头）— 任务 12 补充
+		// 心跳响应（req_id 以 ping 开头）
 		if reqId != "" && len(reqId) >= 4 && reqId[:4] == types.WsCmd.Heartbeat {
 			m.handleHeartbeatResponse(probe.ErrCode, probe.ErrMsg)
 			return
 		}
-		// 回复消息回执（req_id 存在于 pendingAcks 中）— 任务 14 补充
+		// 回复消息回执（req_id 存在于 pendingAcks 中）
 		m.replyMu.Lock()
 		_, hasPendingAck := m.pendingAcks[reqId]
 		m.replyMu.Unlock()
@@ -304,7 +303,7 @@ func (m *WsConnectionManager) handleFrame(raw json.RawMessage) {
 		}
 	case types.WsCmd.EventCallback:
 		m.logger.Debug(fmt.Sprintf("[server -> plugin] cmd=%s, reqId=%s", probe.Cmd, reqId))
-		// disconnected_event：有新连接建立，服务端通知旧连接即将被断开（任务 19）
+		// disconnected_event：有新连接建立，服务端通知旧连接即将被断开
 		if isDisconnectedEvent(raw) {
 			m.logger.Warn("Received disconnected_event: a new connection has been established, this connection will be closed by server")
 			// 先分发事件给上层（OnEvent/OnDisconnectedEvent），再做清理与断连
@@ -480,9 +479,7 @@ func (m *WsConnectionManager) sendAuth() {
 		"bot_id": botId,
 		"secret": botSecret,
 	}
-	for k, v := range extra {
-		body[k] = v
-	}
+	maps.Copy(body, extra)
 
 	frame := map[string]any{
 		"cmd": types.WsCmd.Subscribe,
@@ -723,8 +720,8 @@ func (m *WsConnectionManager) SendReply(frame types.WsFrameHeaders, body any, cm
 	return result.frame, result.err
 }
 
-// processReplyQueue 处理指定 req_id 的回复队列（即任务说明中的 replyProcessor），
-// 对应 Node processReplyQueue：取出队首消息发送，并注册 pendingAck 等待回执。
+// processReplyQueue 处理指定 req_id 的回复队列，对应 Node processReplyQueue（即 replyProcessor）：
+// 取出队首消息发送，并注册 pendingAck 等待回执。
 //
 // 每次只处理一条：发送成功后注册 pending 并返回；回执/超时会触发下一次调用。
 // 发送失败时循环跳过当前项继续下一条，避免递归栈溢出。
@@ -795,7 +792,7 @@ func (m *WsConnectionManager) handleReplyAck(reqId string, raw json.RawMessage) 
 	var ack types.WsFrame[json.RawMessage]
 	result := ackResult{}
 	if err := json.Unmarshal(raw, &ack); err != nil {
-		result.err = fmt.Errorf("Failed to parse reply ack for reqId %s: %s", reqId, err.Error())
+		result.err = fmt.Errorf("failed to parse reply ack for reqId %s: %s", reqId, err.Error())
 		m.logger.Error(result.err.Error())
 	} else if ack.ErrCode != 0 {
 		// 失败：errcode 非 0，同时提供回执帧便于诊断

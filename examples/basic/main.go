@@ -1,7 +1,6 @@
 // examples/basic 对应 Node examples/basic.ts：企业微信智能机器人 SDK 最小闭环示例。
 //
 // 覆盖：连接 → 认证 → 收文本 → 流式回复 → 优雅退出（SIGINT）。
-// 完整示例（图片/文件下载、模板卡片、主动发送等）见后续任务扩充。
 package main
 
 import (

@@ -4,7 +4,6 @@
 文件结构、文件命名、文件拆分、变量与类型命名均与 Node 参考项目保持一致。
 
 >  Node SDK（`https://github.com/WecomTeam/aibot-node-sdk`） 这个项目已 download 到本地，详见：`~/MyFiles/Project/aibot-node-sdk`，所以不用从 `github` 上实时拉取。
->  每次执行完一个任务，更新 `task.md` 任务状态，执行后不要自动提交和继续，由我手动确认无误后自己提交。我主动告诉执行下个任务你再继续执行下个任务。
 
 ## module / 安装
 
@@ -15,7 +14,7 @@
 ## 结构（1:1 镜像 Node `src/`，无 `internal/`）
 
 - `aibot/`：`index.go` / `client.go` / `ws.go` / `message-handler.go` / `api.go` / `crypto.go` / `wecom-crypto.go` / `logger.go` / `utils.go`
-- `aibot/types/`（子包 `types`）：`index.go` / `config.go` / `common.go` / `message.go` / `event.go` / `api.go`
+- `aibot/types/`（子包 `types`）：`config.go` / `common.go` / `message.go` / `event.go` / `api.go`
 - `aibot/index.go` 镜像 Node `src/index.ts`，把 `aibot/types` 的公开符号重新导出到 `aibot`，使用户仅 import `aibot`。
 
 ## 架构总览
@@ -37,6 +36,8 @@
 
 - **字符串拼接一律用 `fmt.Sprintf`**，禁止 `"a" + x + "b"` 风格的 `+` 拼接。
   例：`fmt.Sprintf("Connecting to %s...", url)` 而非 `"Connecting to " + url + "..."`。
+- **错误串首字母小写、不以标点结尾**（遵循 go-staticcheck ST1005）。
+  例：`fmt.Errorf("upload init failed: %s", err)` 而非 `"Upload init failed..."`。
 
 ## 命名约定
 
@@ -52,10 +53,8 @@
 
 ```bash
 go build ./...            # 构建
-go test ./...             # 测试
+go vet ./...              # 静态检查
 go run ./examples/basic   # 运行示例
 ```
-
-任务计划与执行顺序见根目录 `task.md`。
 
 ## 环境提示

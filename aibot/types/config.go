@@ -22,7 +22,7 @@ type WsOptions struct {
 
 // WsClientOptions WSClient 配置选项，对应 Node WSClientOptions。
 //
-// 仅定义结构，默认值由 client（NewWsClient）兜底填充，本任务不处理默认值逻辑。
+// 仅定义结构，默认值由 client（NewWsClient）兜底填充。
 type WsClientOptions struct {
 	BotId                  string    // 机器人 ID（在企业微信后台获取）
 	Secret                 string    // 机器人 Secret（在企业微信后台获取）

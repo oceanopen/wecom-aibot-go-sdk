@@ -218,7 +218,6 @@ encrypt, signature, err := wc.Encrypt(plainText, timestamp, nonce)
 ```bash
 go build ./...        # 构建
 go vet ./...          # 静态检查
-go test ./...         # 测试（含本地 mock WebSocket 服务端集成测试，无需真实凭证）
 go run ./examples/basic
 ```
 

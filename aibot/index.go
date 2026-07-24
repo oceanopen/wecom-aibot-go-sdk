@@ -8,8 +8,6 @@ package aibot
 //	import "github.com/oceanopen/wecom-aibot-go-sdk/aibot"
 //
 // 即可使用 aibot.WsClient、aibot.WsFrame[*aibot.TextMessage] 等。
-//
-// 详细任务计划与执行顺序见项目根目录 task.md。
 
 import "github.com/oceanopen/wecom-aibot-go-sdk/aibot/types"
 
@@ -134,7 +132,7 @@ type DisconnectedEventData = types.DisconnectedEventData
 // EventMessage 事件回调消息结构，重新导出 types.EventMessage。
 type EventMessage = types.EventMessage
 
-// ========== types/api.go：回复通用子结构（任务 24）==========
+// ========== types/api.go：回复通用子结构 ==========
 
 // ReplyMsgItem 回复图文混排子项，重新导出 types.ReplyMsgItem。
 type ReplyMsgItem = types.ReplyMsgItem
@@ -142,7 +140,7 @@ type ReplyMsgItem = types.ReplyMsgItem
 // ReplyFeedback 回复反馈信息，重新导出 types.ReplyFeedback。
 type ReplyFeedback = types.ReplyFeedback
 
-// ========== types/api.go：模板卡片及子结构（任务 24）==========
+// ========== types/api.go：模板卡片及子结构 ==========
 
 // TemplateCardType 卡片类型常量，重新导出 types.TemplateCardType。
 var TemplateCardType = types.TemplateCardType
@@ -195,7 +193,7 @@ type TemplateCardButton = types.TemplateCardButton
 // TemplateCardCheckbox 选择题样式，重新导出 types.TemplateCardCheckbox。
 type TemplateCardCheckbox = types.TemplateCardCheckbox
 
-// ========== types/api.go：回复消息体（任务 24）==========
+// ========== types/api.go：回复消息体 ==========
 
 // StreamReply 流式回复内容对象，重新导出 types.StreamReply。
 type StreamReply = types.StreamReply
@@ -218,7 +216,7 @@ type StreamWithTemplateCardReplyBody = types.StreamWithTemplateCardReplyBody
 // UpdateTemplateCardBody 更新模板卡片消息体，重新导出 types.UpdateTemplateCardBody。
 type UpdateTemplateCardBody = types.UpdateTemplateCardBody
 
-// ========== types/api.go：媒体类型 + 主动发送体（任务 26）==========
+// ========== types/api.go：媒体类型 + 主动发送体 ==========
 
 // WeComMediaType 企业微信媒体类型，重新导出 types.WeComMediaType。
 type WeComMediaType = types.WeComMediaType
@@ -246,7 +244,7 @@ type SendMarkdownMsgBody = types.SendMarkdownMsgBody
 // SendTemplateCardMsgBody 主动发送模板卡片消息体，重新导出 types.SendTemplateCardMsgBody。
 type SendTemplateCardMsgBody = types.SendTemplateCardMsgBody
 
-// ========== types/api.go：上传临时素材（任务 27）==========
+// ========== types/api.go：上传临时素材 ==========
 
 // UploadMediaOptions uploadMedia 选项，重新导出 types.UploadMediaOptions。
 type UploadMediaOptions = types.UploadMediaOptions
