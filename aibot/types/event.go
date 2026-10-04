@@ -43,11 +43,28 @@ type EnterChatEvent struct {
 // GetEventType 返回事件类型，实现 EventContent 接口。
 func (e EnterChatEvent) GetEventType() string { return e.EventType }
 
+// TemplateCardOptionIds 选中项 id 集合（企微数组包装形态：option_id 数组包一层对象）。
+type TemplateCardOptionIds struct {
+	OptionId []string `json:"option_id"` // 选中的选项 id 列表（option_list 各项的 id）
+}
+
+// TemplateCardSelectedItem 单道题的选中项（question_key 定位题目，option_ids 定位选中选项）。
+type TemplateCardSelectedItem struct {
+	QuestionKey string                 `json:"question_key"`         // 题目 key（出站卡 checkbox.question_key / select_list[].question_key）
+	OptionIds   *TemplateCardOptionIds `json:"option_ids,omitempty"` // 该题选中的选项 id 集合
+}
+
+// TemplateCardSelectedItems 模板卡片提交时的选中项集合（企微数组包装形态：selected_item 数组包一层对象）。
+type TemplateCardSelectedItems struct {
+	SelectedItem []TemplateCardSelectedItem `json:"selected_item"` // 每道题一项，含题目 key 与选中选项
+}
+
 // TemplateCardEventData 模板卡片事件，对应 Node TemplateCardEventData。
 type TemplateCardEventData struct {
-	EventType string `json:"eventtype"`           // 事件类型，固定值 template_card_event
-	EventKey  string `json:"event_key,omitempty"` // 用户点击的按钮 key
-	TaskId    string `json:"task_id,omitempty"`   // 任务 ID
+	EventType     string                     `json:"eventtype"`                // 事件类型，固定值 template_card_event
+	EventKey      string                     `json:"event_key,omitempty"`      // 用户点击的按钮 key
+	TaskId        string                     `json:"task_id,omitempty"`        // 任务 ID
+	SelectedItems *TemplateCardSelectedItems `json:"selected_items,omitempty"` // 提交时的选中项集合（带提交按钮的卡型回传；纯点击型事件无此字段）
 }
 
 // GetEventType 返回事件类型，实现 EventContent 接口。
