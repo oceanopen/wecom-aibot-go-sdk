@@ -1,6 +1,6 @@
 // examples/basic 对应 Node examples/basic.ts：企业微信智能机器人 SDK 最小闭环示例。
 //
-// 覆盖：连接 → 认证 → 收文本 → 流式回复 → 优雅退出（SIGINT）。
+// 覆盖：连接 → 认证 → 收文本 → 流式回复 / Markdown 回复 → 优雅退出（SIGINT）。
 package main
 
 import (
@@ -19,7 +19,7 @@ func main() {
 	botId := envOr("WECOM_BOT_ID", "")
 	secret := envOr("WECOM_BOT_SECRET", "")
 
-	// TODO: 增加 botId 和 secret 的非空校验
+	// 增加 botId 和 secret 的非空校验
 	if botId == "" || secret == "" {
 		fmt.Println("❌ 请设置 WECOM_BOT_ID 和 WECOM_BOT_SECRET 环境变量")
 		return
@@ -53,10 +53,20 @@ func main() {
 		fmt.Printf("📨 收到消息: msgtype=%s, msgid=%s\n", frame.Body.MsgType, frame.Body.MsgId)
 	}
 
-	// 收到文本消息：使用流式回复
+	// 收到文本消息：使用流式回复（发送 "md" 时演示一次性 Markdown 回复）
 	client.OnText = func(frame *aibot.WsFrame[aibot.TextMessage]) {
 		content := frame.Body.Text.Content
 		fmt.Printf("📝 收到文本消息: %s\n", content)
+
+		// Markdown 回复：仅长连接模式支持（URL 回调模式不支持 markdown 类型）
+		if content == "md" {
+			if _, err := client.ReplyMarkdown(frame.Headers, markdownDemo(), nil); err != nil {
+				fmt.Printf("Markdown 回复失败: %v\n", err)
+				return
+			}
+			fmt.Println("✅ Markdown 回复完成")
+			return
+		}
 
 		// 拷贝 headers（值类型）供 goroutine 安全使用，避免持有回调帧指针
 		headers := frame.Headers
@@ -107,4 +117,23 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// markdownDemo 构造 Markdown 演示内容（覆盖官方 markdown-v2 常见语法）。
+func markdownDemo() string {
+	return `# Markdown 演示
+
+**加粗** / *斜体*
+
+- 无序列表项
+1. 有序列表项
+
+> 引用
+
+| 语法 | 支持 |
+|:---|:---:|
+| 表格 | ✅ |
+| 列表 | ✅ |
+
+[官方文档](https://developer.work.weixin.qq.com/document/path/101463)`
 }

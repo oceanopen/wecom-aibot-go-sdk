@@ -213,6 +213,9 @@ type TemplateCardReplyBody = types.TemplateCardReplyBody
 // StreamWithTemplateCardReplyBody 流式+模板卡片组合回复体，重新导出 types.StreamWithTemplateCardReplyBody。
 type StreamWithTemplateCardReplyBody = types.StreamWithTemplateCardReplyBody
 
+// MarkdownReplyBody Markdown 回复消息体（官方长连接文档补充，Node SDK 未实现），重新导出 types.MarkdownReplyBody。
+type MarkdownReplyBody = types.MarkdownReplyBody
+
 // UpdateTemplateCardBody 更新模板卡片消息体，重新导出 types.UpdateTemplateCardBody。
 type UpdateTemplateCardBody = types.UpdateTemplateCardBody
 

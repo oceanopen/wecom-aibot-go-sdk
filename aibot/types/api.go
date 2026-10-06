@@ -303,6 +303,20 @@ type StreamWithTemplateCardReplyBody struct {
 	TemplateCard *TemplateCard `json:"template_card,omitempty"` // 模板卡片内容（同一消息只能回复一次）
 }
 
+// ========== Markdown 回复消息体 ==========
+
+// MarkdownReplyBody Markdown 回复消息体（官方长连接协议支持，Node SDK 未实现，基于官方文档补充）。
+//
+// 仅智能机器人长连接（WebSocket）模式支持 markdown 类型回复；被动回复消息（URL 回调）模式
+// 仅支持 stream/template_card/stream_with_template_card，不支持 markdown 类型。
+type MarkdownReplyBody struct {
+	MsgType  string `json:"msgtype"` // 消息类型，固定值 markdown
+	Markdown struct {
+		Content  string         `json:"content"`            // markdown 文本内容（支持常见 markdown 格式，≤20480 字节，utf8）
+		Feedback *ReplyFeedback `json:"feedback,omitempty"` // 反馈信息（回复被用户反馈时触发回调事件）
+	} `json:"markdown"` // markdown 消息内容
+}
+
 // ========== 更新模板卡片消息体 ==========
 
 // UpdateTemplateCardBody 更新模板卡片消息体，对应 Node UpdateTemplateCardBody。

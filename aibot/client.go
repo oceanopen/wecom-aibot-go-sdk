@@ -416,6 +416,19 @@ func (c *WsClient) ReplyMedia(frame types.WsFrameHeaders, mediaType types.WeComM
 	return c.Reply(frame, body, types.WsCmd.Response)
 }
 
+// ReplyMarkdown 回复 Markdown 消息（官方长连接文档补充，Node SDK 未实现）。
+//
+// 通过 aibot_respond_msg 被动回复通道发送一次性完整 markdown 消息（非流式）。
+// 仅长连接（WebSocket）模式支持；被动回复消息（URL 回调）模式不支持 markdown 类型。
+// content 支持常见 markdown 格式（标题/加粗/列表/引用/链接/图片/代码/表格等），≤20480 字节 utf8。
+// feedback 非空时设置，回复被用户反馈时触发反馈回调事件。
+func (c *WsClient) ReplyMarkdown(frame types.WsFrameHeaders, content string, feedback *types.ReplyFeedback) (*types.WsFrame[json.RawMessage], error) {
+	body := types.MarkdownReplyBody{MsgType: "markdown"}
+	body.Markdown.Content = content
+	body.Markdown.Feedback = feedback
+	return c.Reply(frame, body, types.WsCmd.Response)
+}
+
 // buildMediaBody 构造媒体消息体（仅设置与 mediaType 匹配的字段），对应 Node replyMedia/sendMediaMessage 的 body 组装。
 //
 // Node 用动态键 `[mediaType]: mediaContent`，Go 用 switch 设置对应指针字段，产出等价 JSON。
