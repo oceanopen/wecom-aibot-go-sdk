@@ -94,15 +94,16 @@ func (e DisconnectedEventData) GetEventType() string { return e.EventType }
 //
 // Event 字段为接口类型，JSON 反序列化后需调用 DecodeEvent() 获取具体事件类型。
 type EventMessage struct {
-	MsgId      string          `json:"msgid"`              // 本次回调的唯一性标志，用于事件排重
-	CreateTime int             `json:"create_time"`        // 事件产生的时间戳
-	AibotId    string          `json:"aibotid"`            // 智能机器人 id
-	ChatId     string          `json:"chatid,omitempty"`   // 会话 id，仅群聊类型时返回
-	ChatType   string          `json:"chattype,omitempty"` // 会话类型：single 单聊, group 群聊
-	From       EventFrom       `json:"from"`               // 事件触发者信息
-	MsgType    string          `json:"msgtype"`            // 消息类型，事件回调固定为 event
-	Event      EventContent    `json:"-"`                  // 事件内容（DecodeEvent 后填充）
-	rawEvent   json.RawMessage // 原始 event JSON（供 DecodeEvent 使用）
+	MsgId       string          `json:"msgid"`                  // 本次回调的唯一性标志，用于事件排重
+	CreateTime  int             `json:"create_time"`            // 事件产生的时间戳
+	AibotId     string          `json:"aibotid"`                // 智能机器人 id
+	ChatId      string          `json:"chatid,omitempty"`       // 会话 id，仅群聊类型时返回
+	ChatType    string          `json:"chattype,omitempty"`     // 会话类型：single 单聊, group 群聊
+	From        EventFrom       `json:"from"`                   // 事件触发者信息
+	MsgType     string          `json:"msgtype"`                // 消息类型，事件回调固定为 event
+	ResponseUrl string          `json:"response_url,omitempty"` // 支持主动回复消息的临时 url（仅模板卡片事件携带，一次性、1 小时有效）
+	Event       EventContent    `json:"-"`                      // 事件内容（DecodeEvent 后填充）
+	rawEvent    json.RawMessage // 原始 event JSON（供 DecodeEvent 使用）
 }
 
 // UnmarshalJSON 自定义反序列化，将 event 字段暂存为 RawMessage 供 DecodeEvent 使用。
@@ -144,6 +145,20 @@ func (m *EventMessage) DecodeEvent() EventContent {
 			return e
 		}
 	case EventType.TemplateCardEvent:
+		// 官方报文的卡片数据嵌套在与 eventtype 同名的二级键 template_card_event 下
+		//（智能机器人「接收事件」文档示例实证；二级对象不含 eventtype，回填）。
+		// 兼容平铺形态（历史 fixture）。
+		var wrapper struct {
+			TemplateCardEvent TemplateCardEventData `json:"template_card_event"`
+		}
+		if err := json.Unmarshal(m.rawEvent, &wrapper); err == nil {
+			n := wrapper.TemplateCardEvent
+			if n.EventKey != "" || n.TaskId != "" || n.SelectedItems != nil {
+				n.EventType = EventType.TemplateCardEvent
+				m.Event = n
+				return n
+			}
+		}
 		var e TemplateCardEventData
 		if json.Unmarshal(m.rawEvent, &e) == nil {
 			m.Event = e

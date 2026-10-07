@@ -2,6 +2,8 @@ package types
 
 // api.go 对应 Node src/types/api.ts：WsCmd 常量、WsFrame[T]、WsFrameHeaders、模板卡片及回复/发送/上传体类型。
 
+import "encoding/json"
+
 // ========== WebSocket 命令类型常量 ==========
 
 // WsCmd WebSocket 命令类型常量，对应 Node WsCmd。
@@ -57,11 +59,24 @@ type WsFrameHeaders struct {
 //   - 心跳发送：{ cmd: "ping", headers: { req_id } }
 //   - 认证/心跳响应：{ headers: { req_id }, errcode: 0, errmsg: "ok" }
 type WsFrame[T any] struct {
-	Cmd     string         `json:"cmd,omitempty"`     // 命令类型；认证/心跳响应时可能为空
-	Headers WsFrameHeaders `json:"headers"`           // 请求头（含 req_id）
-	Body    T              `json:"body,omitempty"`    // 消息体
-	ErrCode int            `json:"errcode,omitempty"` // 响应错误码，0 表示成功
-	ErrMsg  string         `json:"errmsg,omitempty"`  // 响应错误信息
+	Cmd         string          `json:"cmd,omitempty"`     // 命令类型；认证/心跳响应时可能为空
+	Headers     WsFrameHeaders  `json:"headers"`           // 请求头（含 req_id）
+	Body        T               `json:"body,omitempty"`    // 消息体
+	ErrCode     int             `json:"errcode,omitempty"` // 响应错误码，0 表示成功
+	ErrMsg      string          `json:"errmsg,omitempty"`  // 响应错误信息
+	RawResponse json.RawMessage `json:"-"`                 // 企微返回的原始帧 JSON（入站反序列化时保全；结构化解码有损——字段形态与文档不符时静默丢空，原文是排障第一手资料）
+}
+
+// UnmarshalJSON 反序列化并保全原始帧（RawResponse 按帧填充；出站构造的帧不经过此处，恒空）。
+func (f *WsFrame[T]) UnmarshalJSON(data []byte) error {
+	type alias WsFrame[T]
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*f = WsFrame[T](a)
+	f.RawResponse = append(json.RawMessage(nil), data...)
+	return nil
 }
 
 // ========== 回复消息中的通用子结构 ==========

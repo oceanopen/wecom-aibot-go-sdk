@@ -5,9 +5,10 @@ import (
 	"testing"
 )
 
-// eventFrameFixture 构造完整事件回调帧 JSON（body.event 为原始事件对象）。
+// eventFrameFixture 构造完整事件回调帧 JSON（body.event 为原始事件对象；body 层带模板卡
+// 事件携带的 response_url）。
 func eventFrameFixture(event string) []byte {
-	return []byte(`{"cmd":"aibot_event_callback","headers":{"req_id":"r1"},"body":{"msgid":"m1","create_time":1,"aibotid":"a1","chattype":"single","from":{"userid":"u1"},"msgtype":"event","event":` + event + `}}`)
+	return []byte(`{"cmd":"aibot_event_callback","headers":{"req_id":"r1"},"body":{"msgid":"m1","create_time":1,"aibotid":"a1","chattype":"single","from":{"userid":"u1"},"msgtype":"event","response_url":"https://qyapi.weixin.qq.com/cgi-bin/aibot/response?response_code=CODE","event":` + event + `}}`)
 }
 
 func TestDecodeTemplateCardEventSelectedItems(t *testing.T) {
@@ -37,6 +38,50 @@ func TestDecodeTemplateCardEventSelectedItems(t *testing.T) {
 	second := items.SelectedItem[1]
 	if second.QuestionKey != "q1" || second.OptionIds == nil || len(second.OptionIds.OptionId) != 1 || second.OptionIds.OptionId[0] != "task_2026@01:5" {
 		t.Fatalf("次题解码不符: %+v", second)
+	}
+}
+
+func TestWsFrameRawResponsePreserved(t *testing.T) {
+	// RawResponse 保全企微原始帧：结构化解码有损（字段形态与文档不符时静默丢空），原文是
+	// 排障第一手资料——任何入站帧反序列化后都应按帧携带原文。
+	raw := eventFrameFixture(`{"eventtype":"template_card_event","event_key":"k:1","task_id":"k"}`)
+	var frame WsFrame[EventMessage]
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("解析事件帧失败: %v", err)
+	}
+	if string(frame.RawResponse) != string(raw) {
+		t.Fatalf("RawResponse 应与原始帧逐字节一致: %s", frame.RawResponse)
+	}
+}
+
+func TestDecodeTemplateCardEventNestedForm(t *testing.T) {
+	// 官方报文形态（智能机器人「接收事件」文档示例实证）：卡片数据嵌套在与 eventtype
+	// 同名的二级键 template_card_event 下，二级对象不含 eventtype。
+	raw := eventFrameFixture(`{"eventtype":"template_card_event","template_card_event":{"card_type":"vote_interaction","event_key":"wsbind--1a2b3c4d-9f8e7d6c:submit","task_id":"wsbind--1a2b3c4d-9f8e7d6c","selected_items":{"selected_item":[{"question_key":"wsbind--1a2b3c4d-9f8e7d6c","option_ids":{"option_id":["wsbind--1a2b3c4d-9f8e7d6c:0"]}}]}}}`)
+	var frame WsFrame[EventMessage]
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("解析事件帧失败: %v", err)
+	}
+	event, ok := frame.Body.DecodeEvent().(TemplateCardEventData)
+	if !ok {
+		t.Fatalf("DecodeEvent 未返回 TemplateCardEventData")
+	}
+	if frame.Body.ResponseUrl != "https://qyapi.weixin.qq.com/cgi-bin/aibot/response?response_code=CODE" {
+		t.Fatalf("body 层 response_url 应解码: %q", frame.Body.ResponseUrl)
+	}
+	if event.EventType != EventType.TemplateCardEvent {
+		t.Fatalf("嵌套形态应回填 eventtype: %q", event.EventType)
+	}
+	if event.EventKey != "wsbind--1a2b3c4d-9f8e7d6c:submit" || event.TaskId != "wsbind--1a2b3c4d-9f8e7d6c" {
+		t.Fatalf("嵌套字段解码不符: %+v", event)
+	}
+	items := event.SelectedItems
+	if items == nil || len(items.SelectedItem) != 1 {
+		t.Fatalf("嵌套 selected_items 解码不符: %+v", items)
+	}
+	if item := items.SelectedItem[0]; item.QuestionKey != "wsbind--1a2b3c4d-9f8e7d6c" ||
+		item.OptionIds == nil || len(item.OptionIds.OptionId) != 1 || item.OptionIds.OptionId[0] != "wsbind--1a2b3c4d-9f8e7d6c:0" {
+		t.Fatalf("嵌套选中项不符: %+v", item)
 	}
 }
 

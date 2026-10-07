@@ -297,12 +297,12 @@ func (m *WsConnectionManager) handleFrame(raw json.RawMessage) {
 	// 有 cmd 的帧
 	switch probe.Cmd {
 	case types.WsCmd.Callback:
-		m.logger.Debug(fmt.Sprintf("[server -> plugin] cmd=%s, reqId=%s", probe.Cmd, reqId))
+		m.logger.Debug(fmt.Sprintf("[server -> plugin] cmd=%s, reqId=%s, frame=%s", probe.Cmd, reqId, string(raw)))
 		if m.OnMessage != nil {
 			m.OnMessage(raw)
 		}
 	case types.WsCmd.EventCallback:
-		m.logger.Debug(fmt.Sprintf("[server -> plugin] cmd=%s, reqId=%s", probe.Cmd, reqId))
+		m.logger.Debug(fmt.Sprintf("[server -> plugin] cmd=%s, reqId=%s, frame=%s", probe.Cmd, reqId, string(raw)))
 		// disconnected_event：有新连接建立，服务端通知旧连接即将被断开
 		if isDisconnectedEvent(raw) {
 			m.logger.Warn("Received disconnected_event: a new connection has been established, this connection will be closed by server")
@@ -776,7 +776,6 @@ func (m *WsConnectionManager) handleReplyAck(reqId string, raw json.RawMessage) 
 		m.replyMu.Unlock()
 		return
 	}
-
 	// 清除超时定时器
 	pending.timer.Stop()
 	delete(m.pendingAcks, reqId)
@@ -787,6 +786,9 @@ func (m *WsConnectionManager) handleReplyAck(reqId string, raw json.RawMessage) 
 		m.replyQueues[reqId] = q[1:]
 	}
 	m.replyMu.Unlock()
+
+	// 回执原文观测（DEBUG，锁外）：errcode/errmsg 形态差异只能实测定标。
+	m.logger.Debug(fmt.Sprintf("[server -> plugin] ack reqId=%s, frame=%s", reqId, string(raw)))
 
 	// 解析回执帧
 	var ack types.WsFrame[json.RawMessage]
