@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -623,7 +625,7 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 	var finishBody struct {
 		Type      types.WeComMediaType `json:"type"`
 		MediaId   string               `json:"media_id"`
-		CreatedAt string               `json:"created_at"`
+		CreatedAt json.RawMessage      `json:"created_at"`
 	}
 	if err := json.Unmarshal(finishResult.Body, &finishBody); err != nil {
 		return nil, fmt.Errorf("upload finish failed: parse response: %w", err)
@@ -632,16 +634,12 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 		return nil, fmt.Errorf("upload finish failed: no media_id returned. Response: %s", string(finishResult.Body))
 	}
 
-	// type 缺省回退为入参 type；created_at 缺省回退为当前时间（ISO 8601）
+	// type 缺省回退为入参 type；created_at 归一为 ISO 8601。
 	resultType := finishBody.Type
 	if resultType == "" {
 		resultType = mediaType
 	}
-	createdAt := finishBody.CreatedAt
-	if createdAt == "" {
-		// 对齐 Node new Date().toISOString()：UTC + 固定 3 位毫秒 + Z
-		createdAt = time.Now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
-	}
+	createdAt := parseCreatedAt(finishBody.CreatedAt)
 
 	c.logger.Info(fmt.Sprintf("Upload complete: media_id=%s, type=%s", finishBody.MediaId, resultType))
 
@@ -650,6 +648,31 @@ func (c *WsClient) UploadMedia(fileBuffer []byte, opts types.UploadMediaOptions)
 		MediaId:   finishBody.MediaId,
 		CreatedAt: createdAt,
 	}, nil
+}
+
+/*
+ * parseCreatedAt 归一 finish 帧的 created_at：实测为 unix 秒数字（兼容毫秒与字符串形态），
+ * 统一转 ISO 8601；缺省/不可解析回退当前时间，对齐 Node new Date().toISOString()。
+ */
+func parseCreatedAt(raw json.RawMessage) string {
+	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return iso(time.Now())
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n > 1e12 {
+			return iso(time.UnixMilli(n))
+		}
+		return iso(time.Unix(n, 0))
+	}
+	if unquoted, err := strconv.Unquote(s); err == nil {
+		s = unquoted
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return iso(t)
+	}
+	return iso(time.Now())
 }
 
 // ========== 文件下载 ==========
