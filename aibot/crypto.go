@@ -26,8 +26,8 @@ func DecryptFile(encrypted []byte, aesKey string) ([]byte, error) {
 		return nil, errors.New("decryptFile: aesKey must be a non-empty string")
 	}
 
-	// 将 Base64 编码的 aesKey 解码
-	key, err := base64.StdEncoding.DecodeString(aesKey)
+	// 将 Base64 编码的 aesKey 解码（真机下发为无 padding 形态，兼容两种）
+	key, err := decodeAESKey(aesKey)
 	if err != nil {
 		return nil, fmt.Errorf("decryptFile: invalid base64 aesKey - %w", err)
 	}
@@ -53,6 +53,14 @@ func DecryptFile(encrypted []byte, aesKey string) ([]byte, error) {
 		return nil, fmt.Errorf("decryptFile: Decryption failed - %w. This may indicate corrupted data or an incorrect aesKey", err)
 	}
 	return unpadded, nil
+}
+
+// decodeAESKey 兼容带/不带 padding 的标准 Base64 解码（真机观测：WS 长连接下发的附件密钥为 43 字符无 '=' 形态）。
+func decodeAESKey(s string) ([]byte, error) {
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.RawStdEncoding.DecodeString(s)
 }
 
 // Pkcs7Pad 对 data 进行 PKCS#7 填充至 blockSize 的倍数（填充字节值 = 填充长度）。
